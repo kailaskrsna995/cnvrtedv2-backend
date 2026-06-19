@@ -493,6 +493,89 @@ async def sharpen_icp_from_clients(profile_id: str) -> dict:
     }
 
 
+DOSSIER_PROMPT = """You are an embedded analyst who knows this SELLER's business like an INSIDER —
+their offering, their best-fit customers, and the exact moments a company needs them. Build a precise
+TARGETING DOSSIER that will be used to query the web (especially Exa neural search) with surgical
+precision — so we find companies that are ALREADY a fit, instead of searching broad and filtering.
+
+SELLER CONTEXT (website + positioning):
+{user_context}
+
+SELLER'S OWN ANSWERS (HIGHEST TRUST — they know their business):
+{intake}
+
+RESEARCH on their real clients + dream-fit companies (what these companies ACTUALLY are):
+{research}
+
+Build the dossier with these rules:
+- core_segments: RANK the buyer segments best-fit first. Be specific (not "media" but "mobile microdrama / vertical-video streaming apps scaling original content"). fit = 1-10.
+- anchor_companies: 6-12 REAL, specific companies that are the PUREST examples of a great customer — a mix of their actual clients and dream-fit names. These seed Exa find_similar, so they must be real and on-target.
+- need_signals: the OBSERVABLE, searchable signals that mean "this company needs the seller NOW" (funding for the exact use case, hiring a relevant role, launching a slate, expanding format/market). Not vague.
+- buyer_language: the actual words/phrases a buyer at these companies would use when they have the need.
+- exa_queries: 4-6 RICH, natural-language semantic queries an insider would run on Exa to find these companies — descriptive sentences, NOT keyword soup. e.g. "fast-growing mobile microdrama streaming apps producing serialized vertical video that recently raised funding to scale content production".
+
+Return ONLY valid JSON, no markdown:
+{{
+  "offering": "one sharp line — what they sell + how they deliver",
+  "delivery_model": "service_or_agency | self_serve_product | marketplace_platform",
+  "core_segments": [{{"name": "...", "why": "...", "fit": 9}}],
+  "anchor_companies": ["...", "..."],
+  "need_signals": ["...", "..."],
+  "buyer_titles": ["...", "..."],
+  "buyer_language": ["...", "..."],
+  "geo": "global, with [region] as strength — or specific",
+  "exclude": ["competitors / off-fit to avoid"],
+  "exa_queries": ["rich natural-language query 1", "..."]
+}}"""
+
+
+async def build_seller_dossier(profile_id: str, intake: dict = None) -> dict:
+    """The 'Seller Brain' — fuse website + client/dream-company research + the seller's intake
+    answers into a precise targeting DOSSIER (ranked segments, anchor companies, need-signals,
+    buyer language, ready-to-run Exa semantic queries). Foundation for precision querying.
+    Returns the dossier dict. Does NOT write to DB (caller decides)."""
+    import json
+    p = supabase.table("user_profiles").select("user_context, icp_text, search_profile") \
+        .eq("id", profile_id).execute()
+    if not p.data:
+        return {"error": "profile not found"}
+    row = p.data[0]
+    user_context = row.get("user_context", "") or row.get("icp_text", "") or ""
+    sp = row.get("search_profile") or {}
+    intake = intake or {}
+
+    # Anchor candidates to research = the seller's clients + any dream-fit companies they named
+    anchors = list(dict.fromkeys(
+        (sp.get("lookalike_companies") or []) + (intake.get("dream_companies") or [])))
+    research = await research_clients(anchors) if anchors else "(no client/dream companies provided)"
+    logger.info(f"[Dossier] researched {len(anchors)} anchor companies")
+
+    intake_text = json.dumps(intake, indent=2) if intake else "(no structured answers provided yet)"
+    prompt = DOSSIER_PROMPT.format(
+        user_context=user_context[:1800], intake=intake_text[:1500], research=research[:2000])
+
+    # Long-prose JSON is stochastically malformed — retry regenerates clean (same as ICP gen).
+    last_err = None
+    for attempt in range(3):
+        resp = client.messages.create(
+            model="claude-sonnet-4-5", max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}, {"role": "assistant", "content": "{"}])
+        raw = "{" + resp.content[0].text
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        try:
+            dossier = _loads_tolerant(raw)
+            logger.info(f"[Dossier] built (attempt {attempt+1}): {len(dossier.get('core_segments',[]))} segments, "
+                        f"{len(dossier.get('anchor_companies',[]))} anchors, {len(dossier.get('exa_queries',[]))} exa queries")
+            return dossier
+        except Exception as e:
+            last_err = e
+            logger.warning(f"[Dossier] parse failed (attempt {attempt+1}/3): {e}")
+    logger.error(f"[Dossier] all attempts failed: {last_err}")
+    return {"error": f"dossier parse failed after 3 tries: {last_err}"}
+
+
 async def generate_icp_vector(icp_text: str) -> list[float]:
     """
     Convert ICP text to a 1536-dim vector using OpenAI text-embedding-3-small.
