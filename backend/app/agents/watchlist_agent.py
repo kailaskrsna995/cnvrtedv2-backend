@@ -135,6 +135,67 @@ async def build_watchlist_exa(profile_id: str, icp_text: str, sp: dict, existing
     return rows
 
 
+# Junk domains Exa returns that are NOT a company's own site (app-store mirrors,
+# wikis, aggregators, directories) — drop these from precision results.
+_JUNK_DOMAINS = (
+    "linkedin.", "wikipedia.", "crunchbase.", "youtube.", "play.google.", "apps.apple.",
+    "tracxn.", "ventureradar.", "grokipedia.", "andro.io", "appstor.", "threads.", "twitter.",
+    "x.com", "facebook.", "instagram.", "everything.explained", "wedeal.", "f4.fund",
+    "g2.com", "capterra.", "glassdoor.", "owler.", "pitchbook.", "similarweb.", "medium.com",
+)
+
+
+async def build_precision_targets(profile_id: str, dossier: dict, max_per_query: int = 8) -> list[dict]:
+    """PRECISION Target List — run the seller dossier's insider Exa queries through Exa neural
+    search and collect the REAL companies they return. This is the precision-primary path
+    (vs the keyword build_watchlist_exa): rich semantic queries → on-target companies, niche
+    names broad keyword search misses. Upserts to watchlist_companies (source='precision_exa').
+    Returns the rows added."""
+    from app.config import EXA_API_KEY
+    if not EXA_API_KEY:
+        return []
+    from exa_py import Exa
+    from urllib.parse import urlparse
+    exa = Exa(api_key=EXA_API_KEY)
+
+    queries = dossier.get("exa_queries", [])
+    if not queries:
+        logger.warning("[Precision] dossier has no exa_queries")
+        return []
+
+    existing = supabase.table("watchlist_companies").select("company_name") \
+        .eq("profile_id", profile_id).execute()
+    existing_names = {r["company_name"].lower() for r in (existing.data or [])}
+
+    rows, seen = [], set()
+    for q in queries:
+        try:
+            r = exa.search(q, type="auto", category="company", num_results=max_per_query)
+        except Exception as e:
+            logger.warning(f"[Precision] Exa query failed: {e}")
+            continue
+        for x in getattr(r, "results", []):
+            url = x.url or ""
+            dom = urlparse(url).netloc.replace("www.", "") if url else ""
+            if not dom or dom in seen or any(b in dom for b in _JUNK_DOMAINS):
+                continue
+            name = (x.title or dom).split("|")[0].split("—")[0].split("-")[0].strip()[:50]
+            nl = name.lower()
+            if not name or nl in existing_names or nl in seen:
+                continue
+            seen.add(dom); seen.add(nl)
+            rows.append({
+                "profile_id": profile_id, "company_name": name, "company_domain": dom,
+                "reason": f"precision match: {q[:60]}", "source": "precision_exa",
+            })
+
+    if rows:
+        supabase.table("watchlist_companies").upsert(
+            rows, on_conflict="profile_id,company_name").execute()
+    logger.info(f"[Precision] {len(rows)} precise companies from {len(queries)} insider queries")
+    return rows
+
+
 async def build_watchlist(profile_id: str, top_up: bool = False) -> int:
     """Build in-ICP company watchlist. Exa (live) first, Sonnet tops up. Returns count added."""
     p = supabase.table("user_profiles") \
