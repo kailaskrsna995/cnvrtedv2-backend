@@ -1,0 +1,49 @@
+# ============================================================
+#  SECRETS — never commit (real keys live in backend/.env)
+# ============================================================
+.env
+.env.*
+!.env.example
+
+# ============================================================
+#  Python
+# ============================================================
+venv/
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# ============================================================
+#  Node / Next.js
+# ============================================================
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+# leftover earlier frontend attempt
+frontend-temp/
+
+# ============================================================
+#  Local runtime artifacts, caches, and backups (not source)
+# ============================================================
+backend/results_cache/
+*.backup.json
+*.bak
+all_signals.txt
+backend/all_signals.txt
+backend/icp_compare_out.txt
+backend/icp_full_out.txt
+backend/prompt_lab/_inputs_*.json
+backend/prompt_lab/outputs/
+
+# ============================================================
+#  OS / editor
+# ============================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

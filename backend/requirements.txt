@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+supabase
+anthropic
+httpx
+pydantic
+apscheduler
+
+# Agents
+praw
+exa-py
+tavily-python
+
+# Embeddings
+openai
+
+# Scraping
+crawl4ai
+trafilatura
