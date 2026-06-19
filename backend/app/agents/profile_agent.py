@@ -576,6 +576,54 @@ async def build_seller_dossier(profile_id: str, intake: dict = None) -> dict:
     return {"error": f"dossier parse failed after 3 tries: {last_err}"}
 
 
+async def build_seller_brain(profile_id: str, intake: dict = None) -> dict:
+    """One entrypoint to set up a profile for PRECISION targeting:
+      1. build the seller DOSSIER (deep understanding)
+      2. PERSIST it on the profile (search_profile.dossier — no migration)
+      3. build the precision Target List from the dossier's Exa queries
+      4. add the founder's named DREAM companies as targets (their explicit input)
+    Returns a summary. Idempotent-ish (upserts)."""
+    intake = intake or {}
+    dossier = await build_seller_dossier(profile_id, intake)
+    if dossier.get("error"):
+        return {"error": dossier["error"]}
+
+    # 2. persist dossier inside search_profile (merge, don't clobber existing facets)
+    row = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute().data
+    sp = (row[0].get("search_profile") if row else None) or {}
+    sp["dossier"] = dossier
+    supabase.table("user_profiles").update({"search_profile": sp}).eq("id", profile_id).execute()
+
+    # 3. precision targets from the dossier's insider Exa queries
+    from app.agents.watchlist_agent import build_precision_targets
+    targets = await build_precision_targets(profile_id, dossier)
+
+    # 4. add the founder's DREAM companies as monitored targets (their explicit input,
+    #    not seeding — these are the accounts they'd kill to land)
+    dreams = intake.get("dream_companies") or []
+    dreams_added = 0
+    for name in dreams:
+        n = (name or "").strip()
+        if not n:
+            continue
+        try:
+            supabase.table("watchlist_companies").upsert({
+                "profile_id": profile_id, "company_name": n,
+                "reason": "founder dream account", "source": "dream_target",
+            }, on_conflict="profile_id,company_name").execute()
+            dreams_added += 1
+        except Exception as e:
+            logger.debug(f"[SellerBrain] dream upsert failed for {n}: {e}")
+
+    logger.info(f"[SellerBrain] dossier stored, {len(targets)} precision targets, {dreams_added} dream targets")
+    return {
+        "dossier": dossier,
+        "precision_targets": len(targets),
+        "dream_targets": dreams_added,
+        "segments": [s.get("name") for s in dossier.get("core_segments", [])],
+    }
+
+
 async def generate_icp_vector(icp_text: str) -> list[float]:
     """
     Convert ICP text to a 1536-dim vector using OpenAI text-embedding-3-small.

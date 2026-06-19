@@ -337,6 +337,78 @@ Return ONLY a JSON array, one object per prospect IN ORDER:
     return leads
 
 
+async def rank_by_dossier_fit(candidates: list[dict], dossier: dict, keep_threshold: float = 0.6) -> list[dict]:
+    """CAVEAT SOLUTION (precision↔recall). When we cast a WIDE net (e.g. Exa agent returning
+    ~1700 results, or broad funding), we don't filter with dumb vector/keyword gates — we rank
+    every candidate by DEEP FIT to the seller dossier. One batched Sonnet pass scores each
+    candidate 0-1 against the dossier's ranked segments + need-signals, tags the best-fit segment,
+    and we keep those ≥ keep_threshold, sorted. Turns high recall into clean, ranked precision.
+
+    candidates: [{"company_name","domain"/"company_domain","summary"/"description"}]
+    Returns the kept candidates with added {"fit": float, "segment": str}, sorted by fit desc.
+    """
+    if not candidates:
+        return []
+
+    segs = "\n".join(f"  - [{s.get('fit')}] {s.get('name')}: {s.get('why','')[:90]}"
+                     for s in dossier.get("core_segments", []))
+    signals = "\n".join(f"  - {s}" for s in dossier.get("need_signals", []))
+    items = []
+    for i, c in enumerate(candidates):
+        dom = c.get("domain") or c.get("company_domain") or ""
+        desc = (c.get("summary") or c.get("description") or "")[:160]
+        items.append(f"{i}. {c.get('company_name','?')} ({dom}) — {desc}")
+    listing = "\n".join(items)
+
+    prompt = f"""You are matching candidate companies against a seller's TARGETING DOSSIER. Score how
+well each candidate fits as a CUSTOMER for this seller — be discerning, this is the quality gate that
+turns a wide net into precision.
+
+SELLER OFFERING: {dossier.get('offering','')}
+
+RANKED TARGET SEGMENTS (higher fit = better):
+{segs}
+
+SIGNALS THAT MEAN A COMPANY NEEDS THIS SELLER:
+{signals}
+
+EXCLUDE (not a fit): {', '.join(dossier.get('exclude', []))}
+
+For EACH candidate return its fit 0.0-1.0 (1.0 = textbook customer in a top segment; ≤0.3 = off-ICP
+or excluded) and the best-matching segment name (or "none").
+
+Candidates:
+{listing}
+
+Return ONLY a JSON array, one per candidate IN ORDER:
+[{{"i": 0, "fit": 0.0-1.0, "segment": "..."}}, ...]"""
+
+    try:
+        resp = await client.messages.create(
+            model=SONNET_MODEL, max_tokens=3000,
+            messages=[{"role": "user", "content": prompt}])
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        verdicts = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[DossierRank] failed, returning candidates unranked: {e}")
+        return candidates
+
+    vmap = {v.get("i"): v for v in verdicts if isinstance(v, dict)}
+    kept = []
+    for i, c in enumerate(candidates):
+        v = vmap.get(i)
+        if not v:
+            continue
+        fit = float(v.get("fit", 0))
+        if fit >= keep_threshold:
+            kept.append({**c, "fit": round(fit, 2), "segment": v.get("segment", "")})
+    kept.sort(key=lambda x: x["fit"], reverse=True)
+    logger.info(f"[DossierRank] {len(candidates)} candidates → {len(kept)} kept (fit ≥ {keep_threshold})")
+    return kept
+
+
 async def _call_llm(model: str, messages: list) -> dict:
     for attempt in range(3):
         try:
