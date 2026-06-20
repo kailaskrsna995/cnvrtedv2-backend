@@ -11,6 +11,7 @@ Agents fall back to their old Haiku generation if search_profile is missing
 (profiles created before this feature).
 """
 
+import json
 import logging
 from app.database import supabase
 
@@ -88,9 +89,105 @@ def news_queries(sp: dict, max_queries: int = 8) -> list[str]:
     return list(dict.fromkeys(queries))[:max_queries]
 
 
+def load_dossier(profile_id: str) -> dict | None:
+    """The Seller Brain dossier (stored under search_profile.dossier). None if not built."""
+    sp = load_search_profile(profile_id)
+    return (sp or {}).get("dossier")
+
+
+# ---------------------------------------------------------------------------
+# Dossier-driven Serper queries (Seller Brain → precise trigger search)
+# ---------------------------------------------------------------------------
+# The funding/news agents historically prepended a generic GLOBAL_QUERIES list
+# ("startup raises funding 2026") that floods the pool with off-vertical noise
+# (OpenAI/defense/chips/fintech) which the vector gate then has to throw away —
+# wasting embedding + scoring budget (the 122→25 vector-gate waste). When a
+# Seller Brain dossier exists we have something far better: ranked core_segments
+# + observable need_signals. One small Haiku call turns those into tight, on-ICP
+# Serper queries. The caller drops GLOBAL_QUERIES when these are available.
+
+_DOSSIER_QUERY_PROMPT = """You write Google News search queries to find {kind_desc} at companies
+that match a seller's TARGET DOSSIER. The queries must surface ON-TARGET companies only — no
+generic startup/tech noise.
+
+SELLER OFFERING: {offering}
+
+RANKED TARGET SEGMENTS (highest-fit first — weight queries toward the top ones):
+{segments}
+
+OBSERVABLE NEED SIGNALS (the events that mean a company needs this seller):
+{need_signals}
+
+GEO: {geo}
+
+Write {n} Google News queries that would surface companies in the TOP segments hitting one of the
+{kind_word} need-signals. Rules:
+- Each query under 9 words, end with 2026.
+- Use concrete industry words from the segments (e.g. "microdrama app", "vertical video platform",
+  "audio storytelling app", "regional OTT"), NOT abstract jargon.
+- {kind_rule}
+- No company names. No "startup" alone. No off-vertical filler.
+
+Return ONLY a JSON array of {n} strings."""
+
+_KIND_CONFIG = {
+    "funding": {
+        "kind_desc": "FUNDING events (raises, rounds, acquisitions to scale content)",
+        "kind_word": "funding",
+        "kind_rule": 'Each query must include a funding word: "raises funding" / "Series A" / '
+                     '"Series B" / "seed round" / "acquires studio".',
+    },
+    "news": {
+        "kind_desc": "TRIGGER events (launches, exec hires, expansion, content slate)",
+        "kind_word": "trigger-event",
+        "kind_rule": 'Each query must include a trigger word: "launches" / "appoints head of content" '
+                     '/ "expands into video" / "original series" / "microdrama slate".',
+    },
+}
+
+
+async def dossier_queries(dossier: dict, kind: str, max_queries: int = 8) -> list[str]:
+    """Generate tight Serper queries grounded in the dossier's ranked core_segments
+    + need_signals. kind = 'funding' | 'news'. Returns [] on any failure so the caller
+    can fall back to facet/global queries."""
+    if not dossier or kind not in _KIND_CONFIG:
+        return []
+    try:
+        from anthropic import Anthropic
+        from app.config import ANTHROPIC_API_KEY
+        cfg = _KIND_CONFIG[kind]
+        segs = sorted(dossier.get("core_segments", []), key=lambda s: s.get("fit", 0), reverse=True)
+        seg_lines = "\n".join(f"  - [{s.get('fit')}] {s.get('name','')}" for s in segs[:5]) or "  (none)"
+        need_lines = "\n".join(f"  - {s}" for s in (dossier.get("need_signals") or [])[:8]) or "  (none)"
+        prompt = _DOSSIER_QUERY_PROMPT.format(
+            kind_desc=cfg["kind_desc"], kind_word=cfg["kind_word"], kind_rule=cfg["kind_rule"],
+            offering=(dossier.get("offering") or "")[:300],
+            segments=seg_lines, need_signals=need_lines,
+            geo=(dossier.get("geo") or "global")[:160], n=max_queries,
+        )
+        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=350,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1].lstrip("json").strip()
+        out = json.loads(raw)
+        queries = [q for q in out if isinstance(q, str) and q.strip()][:max_queries]
+        logger.info(f"[QueryBuilder] {len(queries)} dossier {kind} queries: {queries}")
+        return queries
+    except Exception as e:
+        logger.warning(f"[QueryBuilder] dossier {kind} query gen failed: {e}")
+        return []
+
+
 def buyer_queries(sp: dict, max_queries: int = 6) -> list[str]:
-    """Buyer pain phrases are already search-ready — use directly."""
-    return (sp.get("buyer_pain_phrases") or [])[:max_queries]
+    """Prefer the dossier's buyer_language (richer, insider buyer-voice); fall back to
+    the search_profile buyer_pain_phrases for profiles without a dossier."""
+    d = sp.get("dossier") or {}
+    phrases = d.get("buyer_language") or sp.get("buyer_pain_phrases") or []
+    return phrases[:max_queries]
 
 
 # ---------------------------------------------------------------------------

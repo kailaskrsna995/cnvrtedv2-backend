@@ -165,14 +165,22 @@ def make_signal_hash(company: str, url: str) -> str:
 async def run(profile_id: str = None) -> dict:
     logger.info(f"[NewsAgent] Starting run (profile_id={profile_id})")
 
-    # 1. Queries: global + facets (Haiku fallback)
-    from app.pipeline.query_builder import load_search_profile, news_queries, filter_by_performance
+    # 1. Queries: Seller Brain dossier first (precise), then facets. Drop the generic
+    # GLOBAL_QUERIES when a dossier exists — they pull off-vertical launches/CMO-hires.
+    from app.pipeline.query_builder import (
+        load_search_profile, news_queries, filter_by_performance, dossier_queries,
+    )
     queries = list(GLOBAL_QUERIES)
     sp = load_search_profile(profile_id) if profile_id else None
     if sp:
+        dossier = sp.get("dossier")
         facet_queries = news_queries(sp)
-        queries.extend(facet_queries)
-        logger.info(f"[NewsAgent] {len(facet_queries)} facet queries: {facet_queries}")
+        if dossier:
+            dq = await dossier_queries(dossier, "news")
+            queries = dq + facet_queries if dq else facet_queries
+        else:
+            queries.extend(facet_queries)
+        logger.info(f"[NewsAgent] {len(queries)} queries (dossier={'yes' if dossier else 'no'})")
         queries = filter_by_performance(queries, profile_id, "news")
     else:
         try:
@@ -217,6 +225,11 @@ async def run(profile_id: str = None) -> dict:
         ext, article = item["extracted"], item["article"]
         company = ext.get("company_name") or ""
         url = article.get("link", "")
+        # Drop misaligned extractions (batch-by-position can staple a name to the wrong article)
+        from app.agents.funding_agent import name_matches_article
+        if not name_matches_article(company, article.get("title", ""), article.get("snippet", "")):
+            logger.info(f"[NewsAgent] dropped misaligned extraction: '{company}' not in article")
+            continue
         h = make_signal_hash(company, url)
         if h in seen_hashes:
             continue

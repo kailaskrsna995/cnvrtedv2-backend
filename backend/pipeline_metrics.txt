@@ -1,0 +1,38 @@
+=== CNVRTED METRICS (leads-only re-run) — 2026-06-19 23:43 ===
+(reuses stored Opus dossier; tests fuzzy client-exclusion + Sonnet 4.6 judge/outreach + buyer-voice outreach)
+
+status=done  total_signals=200  filtered=125  passed=7
+
+### PER-STAGE IN/OUT ###
+  [ok] Funding agent              total_articles=179  passed_regex=121  matched_vector=110  extracted=97  queued=97
+  [ok] Buyer intent agent         harvested=94  buyer_language=32  signals_queued=32  sources={'reddit': 'serper', 'hackernews': True, 'linkedin': 'apify', 'exa': True}
+  [ok] News agent                 articles=135  passed_regex=88  queued=82
+  [ok] Watchlist agent            watchlist_built=0  checked=90  queued=119
+  [ok] Signal queue               total=200  funding=97  buyer_intent=32  news=71
+  [ok] Pre-filter                 in=200  out=125  dropped_clients_or_invalid=75
+  [ok] Vector match + score       in=125  scored=23
+  [ok] Scoring + dedup            raw_signals=23  unique_companies=19  multi_signal=0
+  [ok] Threshold (≥0.62)          unique_companies=19  passed=13
+  [ok] Final judge (Sonnet)       in=13  kept=7  cut=6  competitors_flagged=0
+  [ok] Outreach lines (Sonnet)    leads=7  written=7
+  [ok] Query memory               queries_tracked=40
+
+### LEAD BREAKDOWN ###
+  final by signal_type:   {'news': 6, 'funding': 1}
+  final by evidence_type: {'trigger': 7}
+
+### FINAL LEADS ###
+[0.82] Mansa  (news/trigger)
+   outreach: Ten original series this summer is an ambitious slate — curious how Mansa is thinking about hitting that production velocity without ballooning costs per episode.
+[0.78] FirstClub  (funding/trigger)
+   outreach: Kuku's IPO runway makes the AI-accelerated production bet obvious — the question is whether the content engine can actually hit the throughput numbers investors will want to see.
+[0.78] BULLET  (news/trigger)
+   outreach: Bringing in a senior marketing lead mid-expansion usually means BULLET needs content volume that the current production setup wasn't built to deliver.
+[0.78] RisingJoy  (news/trigger)
+   outreach: Moving from licensing into originals across 30+ countries means RisingJoy's cost-per-episode math just got significantly harder to control.
+[0.78] COL Group  (news/trigger)
+   outreach: Adding ex-Paramount and Disney execs to a microdrama operation signals COL Group is about to push content output well beyond what a traditional production cadence can support.
+[0.78] Canela Media  (news/trigger)
+   outreach: Launching Zully in two languages simultaneously doubles the content volume problem — every episode decision now has to work for two distinct audiences and production tracks.
+[0.72] Globo  (news/trigger)
+   outreach: An August launch window for 'Quando o Coração Entra em Campo' doesn't leave much runway to build a repeatable production pipeline for what comes after it.

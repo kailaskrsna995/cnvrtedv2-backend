@@ -411,6 +411,20 @@ def make_signal_hash(company_name: str, source_url: str) -> str:
     return hashlib.sha256(f"{company_name or ''}{source_url or ''}".encode()).hexdigest()
 
 
+def name_matches_article(name: str, *texts) -> bool:
+    """Guard against batch-extraction misalignment: Haiku scores 5 articles per call and
+    results are matched by position — if the model reorders/miscounts, a company name gets
+    stapled to the WRONG article's text (e.g. 'FirstClub' onto a Kuku IPO story). Verify the
+    extracted name's distinctive token actually appears in the article before trusting it."""
+    if not name:
+        return False
+    tok = name.split()[0].lower().strip(",.&")
+    if len(tok) < 3:               # too-generic first word → fall back to full name
+        tok = name.lower().strip()
+    blob = " ".join(t.lower() for t in texts if t)
+    return tok in blob
+
+
 # ---------------------------------------------------------------------------
 # Main run (called from leads_v2.py per profile, or scheduler globally)
 # ---------------------------------------------------------------------------
@@ -429,15 +443,26 @@ async def run(profile_id: str = None, threshold: float = None, progress_cb=None)
     logger.info(f"[FundingAgent] Starting run (profile_id={profile_id})")
     seen_hashes: set = set()
 
-    # 1. Build query list — search_profile facets first, Haiku fallback
-    from app.pipeline.query_builder import load_search_profile, funding_queries, filter_by_performance
+    # 1. Build query list — Seller Brain dossier first (precise), then facets.
+    # When a dossier exists we DROP the generic GLOBAL_QUERIES: they flood the pool
+    # with off-vertical raises the vector gate just throws away. The dossier's
+    # ranked segments + need-signals target the right verticals directly.
+    from app.pipeline.query_builder import (
+        load_search_profile, funding_queries, filter_by_performance, dossier_queries,
+    )
     queries = list(GLOBAL_QUERIES)
     if profile_id:
         sp = load_search_profile(profile_id)
         if sp:
+            dossier = sp.get("dossier")
             facet_queries = funding_queries(sp)
-            queries.extend(facet_queries)
-            logger.info(f"[FundingAgent] {len(facet_queries)} facet queries: {facet_queries}")
+            if dossier:
+                dq = await dossier_queries(dossier, "funding")
+                # dossier + facets, NO generic global noise (facets are the fallback breadth)
+                queries = dq + facet_queries if dq else facet_queries
+            else:
+                queries.extend(facet_queries)
+            logger.info(f"[FundingAgent] {len(queries)} queries (dossier={'yes' if dossier else 'no'})")
             queries = filter_by_performance(queries, profile_id, "funding")
         else:
             try:
@@ -518,6 +543,11 @@ async def run(profile_id: str = None, threshold: float = None, progress_cb=None)
         article = item["article"]
         company = ext.get("company_name") or ""
         url     = article.get("link", "")
+
+        # Drop misaligned extractions (name not found in its own article → wrong label)
+        if not name_matches_article(company, article.get("title", ""), item.get("full_text", "")):
+            logger.info(f"[FundingAgent] dropped misaligned extraction: '{company}' not in article")
+            continue
 
         sig_hash = make_signal_hash(company, url)
         if sig_hash in seen_hashes:

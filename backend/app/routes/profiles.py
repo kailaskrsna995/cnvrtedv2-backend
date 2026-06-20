@@ -164,6 +164,26 @@ async def list_profiles(user_id: str):
     return result.data or []
 
 
+@router.post("/{profile_id}/seller-brain")
+async def seller_brain(profile_id: str, body: dict):
+    """Run the SELLER BRAIN from the intake answers (the 8 questions + dream companies):
+    builds the deep dossier, persists it, and builds the precision Target List + dream targets.
+    Body = the intake dict (or {"intake": {...}}). Takes ~30-60s."""
+    intake = body.get("intake") if isinstance(body.get("intake"), dict) else body
+    result = await profile_agent.build_seller_brain(profile_id, intake)
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+    # don't ship the whole dossier back by default — summary is enough for the UI
+    return {
+        "status": "ok",
+        "precision_targets": result["precision_targets"],
+        "dream_targets": result["dream_targets"],
+        "segments": result["segments"],
+        "offering": result["dossier"].get("offering"),
+        "exa_queries": result["dossier"].get("exa_queries", []),
+    }
+
+
 @router.post("/{profile_id}/approve")
 async def approve_icp(profile_id: str, body: ICPApproval):
     """User picked an ICP option. Store it and generate vector."""

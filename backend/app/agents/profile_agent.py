@@ -535,12 +535,20 @@ async def build_seller_dossier(profile_id: str, intake: dict = None) -> dict:
     buyer language, ready-to-run Exa semantic queries). Foundation for precision querying.
     Returns the dossier dict. Does NOT write to DB (caller decides)."""
     import json
-    p = supabase.table("user_profiles").select("user_context, icp_text, search_profile") \
+    p = supabase.table("user_profiles").select("user_context, icp_text, search_profile, website_url") \
         .eq("id", profile_id).execute()
     if not p.data:
         return {"error": "profile not found"}
     row = p.data[0]
     user_context = row.get("user_context", "") or row.get("icp_text", "") or ""
+    # Fresh-crawl the site so the dossier reflects the CURRENT site (not a stale onboarding crawl)
+    try:
+        if row.get("website_url"):
+            site = await deep_crawl_website(row["website_url"])
+            if site:
+                user_context = f"{site[:3000]}\n\n{user_context}"
+    except Exception as e:
+        logger.warning(f"[Dossier] fresh crawl failed, using stored context: {e}")
     sp = row.get("search_profile") or {}
     intake = intake or {}
 
@@ -554,26 +562,74 @@ async def build_seller_dossier(profile_id: str, intake: dict = None) -> dict:
     prompt = DOSSIER_PROMPT.format(
         user_context=user_context[:1800], intake=intake_text[:1500], research=research[:2000])
 
-    # Long-prose JSON is stochastically malformed — retry regenerates clean (same as ICP gen).
-    last_err = None
-    for attempt in range(3):
+    # TOOL-USE for guaranteed-valid structured output (no JSON string parsing — Opus's
+    # long-prose JSON kept breaking the parser; tool_choice returns a clean dict every time).
+    # OPUS here: the dossier is the foundation everything reads + built once per profile (cached),
+    # so the best model is worth it; hot-path scoring stays Haiku.
+    tool = {
+        "name": "emit_dossier",
+        "description": "Return the seller targeting dossier.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "offering": {"type": "string"},
+                "delivery_model": {"type": "string"},
+                "core_segments": {"type": "array", "items": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "why": {"type": "string"}, "fit": {"type": "integer"}}}},
+                "anchor_companies": {"type": "array", "items": {"type": "string"}},
+                "need_signals": {"type": "array", "items": {"type": "string"}},
+                "buyer_titles": {"type": "array", "items": {"type": "string"}},
+                "buyer_language": {"type": "array", "items": {"type": "string"}},
+                "geo": {"type": "string"},
+                "exclude": {"type": "array", "items": {"type": "string"}},
+                "exa_queries": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["offering", "delivery_model", "core_segments", "anchor_companies",
+                         "need_signals", "exa_queries"],
+        },
+    }
+    try:
         resp = client.messages.create(
-            model="claude-sonnet-4-5", max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}, {"role": "assistant", "content": "{"}])
-        raw = "{" + resp.content[0].text
-        raw = raw.strip()
+            model="claude-opus-4-8", max_tokens=2500,
+            tools=[tool], tool_choice={"type": "tool", "name": "emit_dossier"},
+            messages=[{"role": "user", "content": prompt}])
+        dossier = next((b.input for b in resp.content if getattr(b, "type", "") == "tool_use"), None)
+        if not dossier:
+            return {"error": "no tool_use block in dossier response"}
+        logger.info(f"[Dossier] built: {len(dossier.get('core_segments',[]))} segments, "
+                    f"{len(dossier.get('anchor_companies',[]))} anchors, {len(dossier.get('exa_queries',[]))} exa queries")
+        return dossier
+    except Exception as e:
+        logger.error(f"[Dossier] failed: {e}")
+        return {"error": str(e)}
+
+
+async def _dream_fit_reasons(dreams: list, dossier: dict) -> dict:
+    """One Haiku call → a concrete, dossier-grounded fit reason per dream company.
+    Never the label 'dream account' — the ACTUAL reason it fits the ICP. {} on failure."""
+    import json as _json
+    if not dreams:
+        return {}
+    segs = "; ".join((s.get("name") or "") for s in (dossier.get("core_segments") or [])[:6])
+    prompt = (f"Seller offering: {(dossier.get('offering') or '')[:200]}\n"
+              f"Target segments: {segs}\n\n"
+              f"For EACH company, write ONE concrete reason (<14 words) why it's a strong-fit "
+              f"CUSTOMER for this seller — its business model / why it needs this. "
+              f"NOT 'dream account', NOT generic praise.\n"
+              f"Companies: {', '.join(dreams)}\n\n"
+              f'Return ONLY JSON: {{"Company Name": "reason", ...}}')
+    try:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=400,
+            messages=[{"role": "user", "content": prompt}])
+        raw = resp.content[0].text.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1].lstrip("json").strip()
-        try:
-            dossier = _loads_tolerant(raw)
-            logger.info(f"[Dossier] built (attempt {attempt+1}): {len(dossier.get('core_segments',[]))} segments, "
-                        f"{len(dossier.get('anchor_companies',[]))} anchors, {len(dossier.get('exa_queries',[]))} exa queries")
-            return dossier
-        except Exception as e:
-            last_err = e
-            logger.warning(f"[Dossier] parse failed (attempt {attempt+1}/3): {e}")
-    logger.error(f"[Dossier] all attempts failed: {last_err}")
-    return {"error": f"dossier parse failed after 3 tries: {last_err}"}
+        out = _json.loads(raw)
+        return out if isinstance(out, dict) else {}
+    except Exception as e:
+        logger.warning(f"[SellerBrain] dream fit-reasons failed: {e}")
+        return {}
 
 
 async def build_seller_brain(profile_id: str, intake: dict = None) -> dict:
@@ -599,17 +655,17 @@ async def build_seller_brain(profile_id: str, intake: dict = None) -> dict:
     targets = await build_precision_targets(profile_id, dossier)
 
     # 4. add the founder's DREAM companies as monitored targets (their explicit input,
-    #    not seeding — these are the accounts they'd kill to land)
-    dreams = intake.get("dream_companies") or []
+    #    not seeding — these are the accounts they'd kill to land). Never label them
+    #    "dream account" in the UI — show the ACTUAL reason each one fits the ICP.
+    dreams = [(d or "").strip() for d in (intake.get("dream_companies") or []) if (d or "").strip()]
+    reasons = await _dream_fit_reasons(dreams, dossier)
+    _fallback = (dossier.get("core_segments") or [{}])[0].get("name") or "on-ICP target"
     dreams_added = 0
-    for name in dreams:
-        n = (name or "").strip()
-        if not n:
-            continue
+    for n in dreams:
         try:
             supabase.table("watchlist_companies").upsert({
                 "profile_id": profile_id, "company_name": n,
-                "reason": "founder dream account", "source": "dream_target",
+                "reason": reasons.get(n) or _fallback, "source": "dream_target",
             }, on_conflict="profile_id,company_name").execute()
             dreams_added += 1
         except Exception as e:

@@ -15,6 +15,7 @@ tavily-python
 # Embeddings
 openai
 
-# Scraping
-crawl4ai
+# Scraping — Crawl4AI omitted on deploy (needs a headless browser; we use Jina/trafilatura,
+# which is what every run has actually used). Re-add only with a Docker image + Playwright.
 trafilatura
+lxml

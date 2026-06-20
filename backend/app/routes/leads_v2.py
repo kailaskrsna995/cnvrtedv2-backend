@@ -115,6 +115,29 @@ async def _run_agent_and_score(profile_id: str):
             logger.error(f"[leads] News agent failed (continuing): {e}")
             _stage("News agent", "failed", error=str(e))
 
+        # Precision agent (Seller Brain → on-target live leads). Dossier exa_queries →
+        # Exa companies → dossier-fit rank → fresh-trigger check → signals. Additive:
+        # if it yields nothing the broad agents above still produce the baseline.
+        logger.info(f"[leads] Running precision agent for {profile_id}")
+        prec_stage = {"name": "Precision agent", "status": "running", "detail": {}, "error": None}
+        trace["stages"].append(prec_stage)
+        _job_store[profile_id] = {"status": "running", "leads": [], "error": None, "pipeline": trace}
+
+        def prec_progress(d: dict):
+            prec_stage["detail"] = d
+            _job_store[profile_id] = {"status": "running", "leads": [], "error": None, "pipeline": trace}
+
+        try:
+            from app.agents.precision_agent import run as run_precision
+            prec_stats = await run_precision(profile_id, progress_cb=prec_progress)
+            prec_stage["status"] = "ok"
+            prec_stage["detail"] = prec_stats
+        except Exception as e:
+            logger.error(f"[leads] Precision agent failed (continuing): {e}")
+            prec_stage["status"] = "failed"
+            prec_stage["error"] = str(e)
+        _job_store[profile_id] = {"status": "running", "leads": [], "error": None, "pipeline": trace}
+
         logger.info(f"[leads] Running watchlist agent for {profile_id}")
         wl_stage = {"name": "Watchlist agent", "status": "running", "detail": {}, "error": None}
         trace["stages"].append(wl_stage)
@@ -149,6 +172,8 @@ async def _run_agent_and_score(profile_id: str):
         user_context = profile.get("user_context", "")
         # how the seller delivers (studio/agency vs self-serve tool) — drives modality matching
         delivery_model = (profile.get("search_profile") or {}).get("seller_delivery_model")
+        # Seller Brain dossier — the SHARED context both live + company leads are scored against
+        dossier = (profile.get("search_profile") or {}).get("dossier")
 
         # Load existing clients to exclude
         clients_result = supabase.table("existing_clients") \
@@ -171,9 +196,19 @@ async def _run_agent_and_score(profile_id: str):
         _stage("Signal queue", "ok", {"total": len(signals), **by_type})
 
         def _is_existing_client(signal: dict) -> bool:
-            name = (signal.get("company_name") or "").lower()
+            name = (signal.get("company_name") or "").strip().lower()
             domain = (signal.get("company_domain") or "").lower()
-            return name in client_names or (domain and domain in client_domains)
+            if domain and domain in client_domains:
+                return True
+            if not name:
+                return False
+            # fuzzy: "Kuku" signal vs "Kuku FM" client — substring match (guarded against short names)
+            for cn in client_names:
+                if not cn:
+                    continue
+                if cn == name or (len(name) >= 4 and (name in cn or cn in name)):
+                    return True
+            return False
 
         def _is_competitor(signal: dict) -> bool:
             name = (signal.get("company_name") or "").strip().lower()
@@ -237,9 +272,12 @@ async def _run_agent_and_score(profile_id: str):
                 stype = signal.get("signal_type", "funding")
 
                 # Vector gate — skipped for watchlist (in-ICP) AND buyer_intent
-                # (already relevance-filtered; short posts embed low vs ICP).
+                # (already relevance-filtered; short posts embed low vs ICP) AND
+                # precision_exa signals (already Exa-semantic + dossier-fit ranked;
+                # their short "company + headline" text embeds low vs the long ICP).
+                is_precision = signal.get("source_platform") == "precision_exa"
                 match_score = None
-                if stype not in ("watchlist", "buyer_intent"):
+                if stype not in ("watchlist", "buyer_intent") and not is_precision:
                     signal_vector = await vectorise_text(raw_text)
                     if not signal_vector:
                         return None
@@ -258,7 +296,7 @@ async def _run_agent_and_score(profile_id: str):
                 score_result = await score_signal(
                     signal_text=raw_text, signal_type=stype,
                     user_context=user_context, icp_text=icp_text,
-                    delivery_model=delivery_model,
+                    delivery_model=delivery_model, dossier=dossier,
                 )
                 company_name = signal.get("company_name") or score_result.get("company_name") or ""
 
@@ -368,7 +406,7 @@ async def _run_agent_and_score(profile_id: str):
         # that Haiku rationalized through. Flagged competitors → competitors table.
         try:
             from app.pipeline.scoring import judge_leads
-            verdict = await judge_leads(passed, user_context, icp_text, delivery_model)
+            verdict = await judge_leads(passed, user_context, icp_text, delivery_model, dossier)
             kept = verdict["keep"]
             for comp_name in verdict["competitors"]:
                 try:
@@ -390,7 +428,7 @@ async def _run_agent_and_score(profile_id: str):
         if passed:
             try:
                 from app.pipeline.scoring import generate_outreach
-                passed = await generate_outreach(passed, user_context, icp_text)
+                passed = await generate_outreach(passed, user_context, icp_text, dossier)
                 _stage("Outreach lines (Sonnet)", "ok", {
                     "leads": len(passed),
                     "written": sum(1 for l in passed if l.get("outreach")),

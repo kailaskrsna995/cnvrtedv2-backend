@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 HAIKU_MODEL  = "claude-haiku-4-5-20251001"
-SONNET_MODEL = "claude-sonnet-4-5"
+SONNET_MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """You score buyer-intent signals for a seller (could be an agency, a product/SaaS, or a service).
 Judge how well the signal fits what the SELLER offers — read their profile/ICP to understand the offering.
@@ -110,18 +110,33 @@ _MODALITY_RULE = {
 }
 
 
+def _dossier_block(dossier: dict) -> str:
+    """Compact, cache-friendly summary of the Seller Brain dossier — the SHARED context
+    both live (stated-intent) and company (trigger) leads are scored against."""
+    if not dossier:
+        return ""
+    segs = "; ".join(f"{s.get('name')} (fit {s.get('fit')})" for s in (dossier.get("core_segments") or [])[:6])
+    sigs = "; ".join((dossier.get("need_signals") or [])[:6])
+    excl = ", ".join(dossier.get("exclude") or [])
+    return ("SELLER DOSSIER — score fit against THIS:\n"
+            f"- Ranked target segments: {segs}\n"
+            f"- Real need-signals (genuine intent): {sigs}\n"
+            f"- Exclude (not a fit): {excl}")
+
+
 async def score_signal(
     signal_text: str,
     signal_type: str,
     user_context: str,
     icp_text: str,
     delivery_model: str = None,
+    dossier: dict = None,
 ) -> dict:
     """Score one signal. Uses prompt caching on ICP context."""
 
     modality = _MODALITY_RULE.get(delivery_model, "")
 
-    # Cached block — ICP + user_context + delivery model never change within a run
+    # Cached block — ICP + user_context + delivery model + dossier never change within a run
     # Anthropic caches this after first call, ~90% input token saving on repeats
     cached_context = f"""Seller profile (what they offer):
 {user_context[:2000]}
@@ -129,7 +144,8 @@ async def score_signal(
 Seller ICP (ideal customer):
 {icp_text[:2000]}
 
-{modality}"""
+{modality}
+{_dossier_block(dossier)}"""
 
     user_message = f"""Signal to score:
 Type: {signal_type}
@@ -183,7 +199,7 @@ For company_name, extract the company OR the person's name/handle if it's an ind
 
 
 async def judge_leads(leads: list[dict], user_context: str, icp_text: str,
-                      delivery_model: str = None) -> dict:
+                      delivery_model: str = None, dossier: dict = None) -> dict:
     """
     Final strict gate — one Sonnet pass over all passing leads, judged against THIS
     seller's own ICP + offering (fully profile-driven, no hardcoded rules → universal).
@@ -221,6 +237,7 @@ SELLER'S IDEAL CUSTOMER:
 {icp_text[:1800]}
 
 {modality}
+{_dossier_block(dossier)}
 
 For EACH candidate decide:
 - keep=true ONLY if it's a real, on-ICP, MODALITY-MATCHED buyer for THIS seller with a genuine
@@ -269,7 +286,7 @@ Return ONLY a JSON array, one object per candidate IN ORDER:
     return {"keep": keep, "competitors": competitors}
 
 
-async def generate_outreach(leads: list[dict], user_context: str, icp_text: str) -> list[dict]:
+async def generate_outreach(leads: list[dict], user_context: str, icp_text: str, dossier: dict = None) -> list[dict]:
     """
     Personalized first-line opener per lead — ONE batched Sonnet call for the whole
     list (cheap, fast, no per-lead concurrency). Each opener references THIS lead's
@@ -299,6 +316,8 @@ SELLER (who is reaching out, what they offer):
 
 SELLER'S IDEAL CUSTOMER:
 {icp_text[:1200]}
+
+The buyer's own words / phrasing (echo this voice, don't sound like a vendor): {", ".join((dossier or {}).get("buyer_language", [])[:8]) or "n/a"}
 
 For EACH prospect, write ONE personalized opening line (max ~25 words) that:
 - references THIS prospect's specific trigger/intent (use the proof — the real event or ask)
