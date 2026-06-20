@@ -184,6 +184,76 @@ async def seller_brain(profile_id: str, body: dict):
     }
 
 
+@router.post("/onboard")
+async def onboard(body: dict):
+    """FULL onboarding from scratch (basic UI posts here):
+    { username, website_url, intake: {the 8 questions + dream_companies} }
+    → creates a user+profile keyed by username, synthesizes ICP context + vector + search
+    facets, stores best_clients as exclusions, then runs the Seller Brain (dossier +
+    precision Target List). Returns the new profile_id. ~60-90s."""
+    username = (body.get("username") or "").strip()
+    website_url = (body.get("website_url") or "").strip()
+    intake = body.get("intake") or {}
+    if not username or not website_url:
+        raise HTTPException(status_code=400, detail="username and website_url are required")
+
+    # 1. user — keyed by username (gives us control over profiles)
+    email = username if "@" in username else f"{username}@cnvrted.app"
+    user = supabase.table("users").upsert({"email": email}, on_conflict="email").execute()
+    user_id = user.data[0]["id"]
+
+    # 2. synthesize ICP context from the intake answers
+    icp_text = " | ".join(x for x in [
+        intake.get("offering", ""),
+        f"Ideal customer: {intake.get('ideal_customer', '')}",
+        f"Buyer: {intake.get('buyer', '')}",
+        f"Triggers: {intake.get('need_trigger', '')}",
+    ] if x and x.strip(": "))
+    user_context = intake.get("offering", "") or icp_text
+
+    from app.pipeline.matching import vectorise_text
+    icp_vector = await vectorise_text(icp_text)
+    search_profile = await profile_agent.build_search_profile(icp_text, user_context)
+    if intake.get("delivery_model"):
+        search_profile["seller_delivery_model"] = intake["delivery_model"]
+
+    # 3. create the profile
+    prof = supabase.table("user_profiles").insert({
+        "user_id": user_id,
+        "name": username,
+        "website_url": website_url,
+        "service_description": intake.get("offering", ""),
+        "target_description": intake.get("ideal_customer", ""),
+        "user_context": user_context,
+        "icp_text": icp_text,
+        "icp_vector": icp_vector,
+        "search_profile": search_profile,
+    }).execute()
+    profile_id = prof.data[0]["id"]
+    logger.info(f"[onboard] created profile {profile_id} for '{username}'")
+
+    # 4. seller's named best clients → exclude from leads
+    for c in (intake.get("best_clients") or []):
+        try:
+            supabase.table("existing_clients").upsert(
+                {"profile_id": profile_id, "company_name": c},
+                on_conflict="profile_id,company_name").execute()
+        except Exception:
+            pass
+
+    # 5. Seller Brain — dossier + precision Target List + dream targets
+    brain = await profile_agent.build_seller_brain(profile_id, intake)
+
+    return {
+        "status": "ok",
+        "profile_id": profile_id,
+        "username": username,
+        "precision_targets": brain.get("precision_targets", 0),
+        "dream_targets": brain.get("dream_targets", 0),
+        "segments": brain.get("segments", []),
+    }
+
+
 @router.post("/{profile_id}/approve")
 async def approve_icp(profile_id: str, body: ICPApproval):
     """User picked an ICP option. Store it and generate vector."""
