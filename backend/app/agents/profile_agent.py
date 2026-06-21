@@ -569,6 +569,7 @@ SELLER FEEDBACK:
 {message}
 
 Guidance:
+- If the message is a greeting, a question, off-topic, or too vague to act on, make NO changes — return ONLY a friendly reply asking what they'd like to adjust (give 1-2 examples). Leave every change field empty.
 - "these X aren't my buyers" → add X to add_exclude AND remove/down-weight the matching segment.
 - "focus more on X / less on Y" → reweight (raise X, lower Y) or add_segments.
 - geo change → set_geo, and if it changes WHO you'd target, return a fresh full exa_queries set.
@@ -600,6 +601,13 @@ async def refine_dossier(profile_id: str, message: str) -> dict:
         return {"reply": "Sorry, I hit an error — try rephrasing.", "rebuilding": False, "removed": 0}
     if not patch:
         return {"reply": "I couldn't parse that — try rephrasing.", "rebuilding": False, "removed": 0}
+
+    # No-op guard: greeting / question / vague input → reply only, never touch the dossier.
+    _change_keys = ("add_exclude", "remove_segments", "add_segments", "reweight",
+                    "set_geo", "add_anchors", "add_need_signals", "set_buyer_titles", "exa_queries")
+    if not any(patch.get(k) for k in _change_keys):
+        return {"reply": patch.get("reply") or "Tell me what to change — e.g. “exclude big enterprises” or “focus more on X.”",
+                "rebuilding": False, "removed": 0}
 
     prev = json.loads(json.dumps(dossier))   # deep copy for undo
     structural = False
