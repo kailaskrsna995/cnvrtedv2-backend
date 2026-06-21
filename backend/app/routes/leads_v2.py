@@ -50,10 +50,42 @@ def _load_results_cache(profile_id: str):
         return None
 
 
+def _save_results_db(profile_id: str, data: dict):
+    """Durable per-profile run cache in Supabase — survives Railway redeploys (the disk
+    cache + in-memory store do NOT). No-ops gracefully if the lead_runs table is missing."""
+    try:
+        from datetime import datetime, timezone
+        supabase.table("lead_runs").upsert(
+            {"profile_id": profile_id, "result": data,
+             "updated_at": datetime.now(timezone.utc).isoformat()},
+            on_conflict="profile_id").execute()
+    except Exception as e:
+        logger.warning(f"[leads] DB result save failed (run the lead_runs migration?): {e}")
+
+
+def _load_results_db(profile_id: str):
+    try:
+        r = supabase.table("lead_runs").select("result").eq("profile_id", profile_id).execute()
+        if r.data:
+            return r.data[0]["result"]
+    except Exception:
+        pass
+    return None
+
+
+def _persist_results(profile_id: str, data: dict):
+    _persist_results(profile_id, data)   # disk — fast, same-deploy
+    _save_results_db(profile_id, data)      # DB — durable across deploys
+
+
+def _load_results_any(profile_id: str):
+    return _job_store.get(profile_id) or _load_results_db(profile_id) or _load_results_cache(profile_id)
+
+
 def remove_companies_from_cache(profile_id: str, exclude_terms: list) -> int:
     """Drop excluded companies from the cached run — lets the refine chatbot make
     leads vanish instantly without a re-scan. Matches explicit names (len>=4)."""
-    data = _job_store.get(profile_id) or _load_results_cache(profile_id)
+    data = _load_results_any(profile_id)
     if not data:
         return 0
     ex = [e.lower() for e in (exclude_terms or []) if e and len(e) >= 4]
@@ -70,7 +102,7 @@ def remove_companies_from_cache(profile_id: str, exclude_terms: list) -> int:
         data["all"] = [l for l in data["all"] if keep(l)]
     data["passed"] = len(data.get("leads", []))
     _job_store[profile_id] = data
-    _save_results_cache(profile_id, data)
+    _persist_results(profile_id, data)
     return before - len(data.get("leads", []))
 
 
@@ -521,7 +553,7 @@ async def _run_agent_and_score(profile_id: str):
             "error": None,
         }
         _job_store[profile_id] = final
-        _save_results_cache(profile_id, final)  # survive restarts
+        _persist_results(profile_id, final)  # disk + DB (survives Railway redeploys)
 
     except Exception as e:
         logger.error(f"[leads] Background job failed: {e}")
@@ -546,7 +578,7 @@ async def get_results(profile_id: str):
     job = _job_store.get(profile_id)
     if job:
         return job
-    cached = _load_results_cache(profile_id)
+    cached = _load_results_db(profile_id) or _load_results_cache(profile_id)
     if cached:
         return {**cached, "from_cache": True}
     return {"status": "idle"}
@@ -582,7 +614,7 @@ async def get_cold_list(profile_id: str, include_dormant: bool = False):
     # Read-time enrichment: swap the generic "discovered by agent" placeholder for the
     # actual lead reasoning (the why) pulled from the cached run — so existing rows show
     # a real reason without a re-scan.
-    cached = _job_store.get(profile_id) or _load_results_cache(profile_id)
+    cached = _load_results_any(profile_id)
     if cached:
         why_by = {}
         for l in (cached.get("leads") or []) + (cached.get("all") or []):
@@ -689,7 +721,7 @@ async def remove_lead(profile_id: str, body: dict):
     name = (body.get("company_name") or "").strip().lower()
     if not name:
         return {"removed": 0}
-    data = _job_store.get(profile_id) or _load_results_cache(profile_id)
+    data = _load_results_any(profile_id)
     if not data:
         return {"removed": 0}
     before = len(data.get("leads", []))
@@ -698,7 +730,7 @@ async def remove_lead(profile_id: str, body: dict):
         data["all"] = [l for l in data["all"] if (l.get("company_name") or "").strip().lower() != name]
     data["passed"] = len(data.get("leads", []))
     _job_store[profile_id] = data
-    _save_results_cache(profile_id, data)
+    _persist_results(profile_id, data)
     return {"removed": before - len(data.get("leads", []))}
 
 
