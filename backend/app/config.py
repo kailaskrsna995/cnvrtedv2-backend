@@ -26,6 +26,10 @@ APIFY_PEOPLE_SEARCH_ACTOR = os.getenv("APIFY_PEOPLE_SEARCH_ACTOR", "powerai/link
 APIFY_EMPLOYEES_ACTOR = os.getenv("APIFY_EMPLOYEES_ACTOR", "apimaestro/linkedin-company-employees-scraper-no-cookies")
 APIFY_LINKEDIN_ACTOR = os.getenv("APIFY_LINKEDIN_ACTOR", "apimaestro/linkedin-posts-search-scraper")
 
+# Notion export (founder's workspace via internal integration token)
+NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
+NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID", "")
+
 # Enrichment
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY", "")
 FULLENRICH_API_KEY = os.getenv("FULLENRICH_API_KEY", "")

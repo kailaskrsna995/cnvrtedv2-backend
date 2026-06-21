@@ -745,6 +745,18 @@ async def remove_lead(profile_id: str, body: dict):
     return {"removed": before - len(data.get("leads", []))}
 
 
+@router.post("/{profile_id}/export-notion")
+async def export_notion(profile_id: str, body: dict):
+    """Export the current list into the founder's Notion as a new database. Body =
+    { title, columns:[{name,type}], rows:[{colName:value}] }. Returns {url, written}."""
+    from app.agents.notion_export import export_to_notion
+    return await export_to_notion(
+        body.get("title", "cnvrted export"),
+        body.get("columns", []),
+        body.get("rows", []),
+    )
+
+
 @router.get("/competitors/{profile_id}")
 async def list_competitors(profile_id: str):
     r = supabase.table("competitors").select("name, url").eq("profile_id", profile_id).execute()
