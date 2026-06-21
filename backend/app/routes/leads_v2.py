@@ -683,6 +683,25 @@ async def cold_list_enrich_status(profile_id: str):
     return _coldlist_jobs.get(profile_id, {"status": "idle"})
 
 
+@router.post("/{profile_id}/remove-lead")
+async def remove_lead(profile_id: str, body: dict):
+    """Manually remove a single lead from the cached run (the X button on a row)."""
+    name = (body.get("company_name") or "").strip().lower()
+    if not name:
+        return {"removed": 0}
+    data = _job_store.get(profile_id) or _load_results_cache(profile_id)
+    if not data:
+        return {"removed": 0}
+    before = len(data.get("leads", []))
+    data["leads"] = [l for l in data.get("leads", []) if (l.get("company_name") or "").strip().lower() != name]
+    if isinstance(data.get("all"), list):
+        data["all"] = [l for l in data["all"] if (l.get("company_name") or "").strip().lower() != name]
+    data["passed"] = len(data.get("leads", []))
+    _job_store[profile_id] = data
+    _save_results_cache(profile_id, data)
+    return {"removed": before - len(data.get("leads", []))}
+
+
 @router.get("/competitors/{profile_id}")
 async def list_competitors(profile_id: str):
     r = supabase.table("competitors").select("name, url").eq("profile_id", profile_id).execute()

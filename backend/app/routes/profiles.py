@@ -153,6 +153,15 @@ async def create_profile(body: ProfileCreate):
     }
 
 
+@router.get("/list")
+async def list_all_profiles():
+    """All profiles (single-tenant demo) — powers the workspace switcher dropdown.
+    Newest first so a freshly-onboarded demo profile is at the top."""
+    r = supabase.table("user_profiles").select("id, name, created_at") \
+        .order("created_at", desc=True).limit(40).execute()
+    return [{"id": p["id"], "name": p.get("name") or "Untitled"} for p in (r.data or [])]
+
+
 @router.get("/{user_id}/all")
 async def list_profiles(user_id: str):
     """Return all profiles for a user."""
