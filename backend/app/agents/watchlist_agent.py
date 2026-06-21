@@ -303,14 +303,15 @@ Return ONLY a JSON array, one per candidate IN ORDER: [{{"i":0,"keep":true}}, ..
         return pool
 
 
-def add_discovered_company(profile_id: str, company_name: str, domain: str = None):
-    """Called when other agents find an in-ICP company — watchlist grows itself."""
+def add_discovered_company(profile_id: str, company_name: str, domain: str = None, reason: str = None):
+    """Called when other agents find an in-ICP company — watchlist grows itself.
+    Stores the lead's actual reasoning (why) so the Target List shows a real reason."""
     try:
         supabase.table("watchlist_companies").upsert({
             "profile_id": profile_id,
             "company_name": company_name,
             "company_domain": domain,
-            "reason": "discovered by agent (passed scoring)",
+            "reason": (reason or "matched your ICP via a live signal")[:400],
             "source": "agent_discovery",
         }, on_conflict="profile_id,company_name").execute()
     except Exception as e:

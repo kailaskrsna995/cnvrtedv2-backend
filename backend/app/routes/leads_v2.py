@@ -495,7 +495,7 @@ async def _run_agent_and_score(profile_id: str):
             for r in passed:
                 if (r.get("signal_type") in ("funding", "news")
                         and _clean_company(r.get("company_name"))):
-                    add_discovered_company(profile_id, r["company_name"], r.get("company_domain"))
+                    add_discovered_company(profile_id, r["company_name"], r.get("company_domain"), reason=r.get("why"))
         except Exception as e:
             logger.debug(f"[leads] watchlist feedback failed: {e}")
 
@@ -579,6 +579,22 @@ async def get_cold_list(profile_id: str, include_dormant: bool = False):
     # dormant = explicitly checked and found inactive (e.g. defunct studio)
     if not include_dormant:
         rows = [x for x in rows if x.get("is_active") is not False]
+    # Read-time enrichment: swap the generic "discovered by agent" placeholder for the
+    # actual lead reasoning (the why) pulled from the cached run — so existing rows show
+    # a real reason without a re-scan.
+    cached = _job_store.get(profile_id) or _load_results_cache(profile_id)
+    if cached:
+        why_by = {}
+        for l in (cached.get("leads") or []) + (cached.get("all") or []):
+            n = (l.get("company_name") or "").lower()
+            if n and l.get("why") and n not in why_by:
+                why_by[n] = l["why"]
+        for x in rows:
+            rsn = x.get("reason") or ""
+            if "discovered by agent" in rsn or not rsn:
+                w = why_by.get((x.get("company_name") or "").lower())
+                if w:
+                    x["reason"] = w
     # liked first, then proven (has proof), then has-contact, then rest
     rows.sort(key=lambda x: (x.get("feedback") != "liked", not x.get("proof_url"), not x.get("contact_name")))
     with_contact = sum(1 for x in rows if x.get("contact_name"))
