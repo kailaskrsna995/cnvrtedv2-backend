@@ -55,8 +55,10 @@ def _save_results_db(profile_id: str, data: dict):
     cache + in-memory store do NOT). No-ops gracefully if the lead_runs table is missing."""
     try:
         from datetime import datetime, timezone
+        # serialize to a clean, plain-type structure (no shared/odd refs) before the upsert
+        clean = json.loads(json.dumps(data, default=str))
         supabase.table("lead_runs").upsert(
-            {"profile_id": profile_id, "result": data,
+            {"profile_id": profile_id, "result": clean,
              "updated_at": datetime.now(timezone.utc).isoformat()},
             on_conflict="profile_id").execute()
     except Exception as e:
@@ -553,7 +555,11 @@ async def _run_agent_and_score(profile_id: str):
             "error": None,
         }
         _job_store[profile_id] = final
-        _persist_results(profile_id, final)  # disk + DB (survives Railway redeploys)
+        try:
+            _persist_results(profile_id, final)  # disk + DB (survives Railway redeploys)
+        except Exception as e:
+            # persistence must NEVER discard a good run — leads stay in memory either way
+            logger.error(f"[leads] persist failed (leads kept in memory): {e}")
 
     except Exception as e:
         logger.error(f"[leads] Background job failed: {e}")

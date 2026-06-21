@@ -262,7 +262,7 @@ Return ONLY a JSON array, one object per candidate IN ORDER:
     try:
         resp = await client.messages.create(
             model=SONNET_MODEL,
-            max_tokens=1500,
+            max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.content[0].text.strip()
