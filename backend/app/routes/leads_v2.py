@@ -50,6 +50,30 @@ def _load_results_cache(profile_id: str):
         return None
 
 
+def remove_companies_from_cache(profile_id: str, exclude_terms: list) -> int:
+    """Drop excluded companies from the cached run — lets the refine chatbot make
+    leads vanish instantly without a re-scan. Matches explicit names (len>=4)."""
+    data = _job_store.get(profile_id) or _load_results_cache(profile_id)
+    if not data:
+        return 0
+    ex = [e.lower() for e in (exclude_terms or []) if e and len(e) >= 4]
+    if not ex:
+        return 0
+
+    def keep(l):
+        n = (l.get("company_name") or "").lower()
+        return not (n and any(e in n or n in e for e in ex))
+
+    before = len(data.get("leads", []))
+    data["leads"] = [l for l in data.get("leads", []) if keep(l)]
+    if isinstance(data.get("all"), list):
+        data["all"] = [l for l in data["all"] if keep(l)]
+    data["passed"] = len(data.get("leads", []))
+    _job_store[profile_id] = data
+    _save_results_cache(profile_id, data)
+    return before - len(data.get("leads", []))
+
+
 async def _run_agent_and_score(profile_id: str):
     """Background task — runs funding agent + scores signals against profile ICP."""
     import re

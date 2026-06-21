@@ -530,6 +530,160 @@ Return ONLY valid JSON, no markdown:
 }}"""
 
 
+# ---------------------------------------------------------------------------
+# REFINE — conversational dossier editor (the "Ask cnvrted" chatbot)
+# ---------------------------------------------------------------------------
+
+_REFINE_TOOL = {
+    "name": "emit_dossier_patch",
+    "description": "Apply the seller's plain-English feedback to their targeting dossier.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reply": {"type": "string", "description": "1-2 friendly sentences to the seller, summarizing what changed"},
+            "add_exclude": {"type": "array", "items": {"type": "string"}, "description": "company names OR types to exclude"},
+            "remove_segments": {"type": "array", "items": {"type": "string"}, "description": "EXACT names of core_segments to drop"},
+            "add_segments": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "why": {"type": "string"}, "fit": {"type": "integer"}}}},
+            "reweight": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "fit": {"type": "integer"}}}, "description": "adjust fit (1-10) of existing segments by exact name"},
+            "set_geo": {"type": "string"},
+            "add_anchors": {"type": "array", "items": {"type": "string"}},
+            "add_need_signals": {"type": "array", "items": {"type": "string"}},
+            "set_buyer_titles": {"type": "array", "items": {"type": "string"}},
+            "exa_queries": {"type": "array", "items": {"type": "string"},
+                            "description": "ONLY if a structural change makes the old queries stale — return the FULL fresh set (4-6); else omit"},
+        },
+        "required": ["reply"],
+    },
+}
+
+_REFINE_PROMPT = """The seller is refining their targeting dossier with feedback. Read their message + the
+current dossier, then emit a PATCH reflecting their intent. Be precise and CONSERVATIVE — change only what
+they asked; NEVER wipe the dossier. Keep their vertical intact unless they explicitly change it.
+
+CURRENT DOSSIER:
+{dossier}
+
+SELLER FEEDBACK:
+{message}
+
+Guidance:
+- "these X aren't my buyers" → add X to add_exclude AND remove/down-weight the matching segment.
+- "focus more on X / less on Y" → reweight (raise X, lower Y) or add_segments.
+- geo change → set_geo, and if it changes WHO you'd target, return a fresh full exa_queries set.
+- If segments/anchors/geo changed enough that the search queries are now stale, return a FRESH FULL
+  exa_queries set (4-6, in the seller's OWN vertical); otherwise omit exa_queries.
+- reply: talk to the seller in 1-2 warm sentences about exactly what you changed."""
+
+
+async def refine_dossier(profile_id: str, message: str) -> dict:
+    """Apply NL feedback to the dossier. Returns {reply, rebuilding, removed}.
+    Fully guarded — on any failure the dossier is untouched."""
+    import json
+    if not (message or "").strip():
+        return {"reply": "Tell me what to change about your list.", "rebuilding": False, "removed": 0}
+    p = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute()
+    sp = (p.data[0].get("search_profile") if p.data else None) or {}
+    dossier = sp.get("dossier")
+    if not dossier:
+        return {"reply": "Build a profile first (ICP Config), then I can refine your list.", "rebuilding": False, "removed": 0}
+    try:
+        resp = client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=2000,
+            tools=[_REFINE_TOOL], tool_choice={"type": "tool", "name": "emit_dossier_patch"},
+            messages=[{"role": "user", "content": _REFINE_PROMPT.format(
+                dossier=json.dumps(dossier)[:4000], message=message[:600])}])
+        patch = next((b.input for b in resp.content if getattr(b, "type", "") == "tool_use"), None)
+    except Exception as e:
+        logger.error(f"[refine] LLM failed: {e}")
+        return {"reply": "Sorry, I hit an error — try rephrasing.", "rebuilding": False, "removed": 0}
+    if not patch:
+        return {"reply": "I couldn't parse that — try rephrasing.", "rebuilding": False, "removed": 0}
+
+    prev = json.loads(json.dumps(dossier))   # deep copy for undo
+    structural = False
+    if patch.get("add_exclude"):
+        dossier["exclude"] = list(dict.fromkeys((dossier.get("exclude") or []) + patch["add_exclude"]))
+    if patch.get("remove_segments"):
+        drop = {n.lower() for n in patch["remove_segments"]}
+        dossier["core_segments"] = [s for s in dossier.get("core_segments", []) if (s.get("name") or "").lower() not in drop]
+        structural = True
+    if patch.get("add_segments"):
+        dossier["core_segments"] = dossier.get("core_segments", []) + patch["add_segments"]; structural = True
+    if patch.get("reweight"):
+        wmap = {w["name"].lower(): w.get("fit") for w in patch["reweight"] if w.get("name")}
+        for s in dossier.get("core_segments", []):
+            if (s.get("name") or "").lower() in wmap:
+                s["fit"] = wmap[(s["name"] or "").lower()]
+    if patch.get("set_geo"):
+        dossier["geo"] = patch["set_geo"]; structural = True
+    if patch.get("add_anchors"):
+        dossier["anchor_companies"] = list(dict.fromkeys((dossier.get("anchor_companies") or []) + patch["add_anchors"])); structural = True
+    if patch.get("add_need_signals"):
+        dossier["need_signals"] = list(dict.fromkeys((dossier.get("need_signals") or []) + patch["add_need_signals"]))
+    if patch.get("set_buyer_titles"):
+        dossier["buyer_titles"] = patch["set_buyer_titles"]
+    if patch.get("exa_queries"):
+        dossier["exa_queries"] = patch["exa_queries"]; structural = True
+    dossier["core_segments"] = sorted(dossier.get("core_segments", []), key=lambda s: s.get("fit", 0), reverse=True)
+
+    sp["dossier"] = dossier; sp["dossier_prev"] = prev
+    supabase.table("user_profiles").update({"search_profile": sp}).eq("id", profile_id).execute()
+
+    removed = _apply_excludes(profile_id, patch.get("add_exclude") or [])
+    return {"reply": patch.get("reply", "Updated your targeting."), "rebuilding": structural, "removed": removed}
+
+
+def _apply_excludes(profile_id: str, excludes: list) -> int:
+    """Instantly drop excluded companies from the Target List + cached leads (explicit names)."""
+    ex = [e.lower() for e in (excludes or []) if e and len(e) >= 4]
+    if not ex:
+        return 0
+    removed = 0
+    try:
+        rows = supabase.table("watchlist_companies").select("id, company_name") \
+            .eq("profile_id", profile_id).execute().data or []
+        for r in rows:
+            n = (r.get("company_name") or "").lower()
+            if n and any(e in n or n in e for e in ex):
+                supabase.table("watchlist_companies").delete().eq("id", r["id"]).execute()
+                removed += 1
+    except Exception as e:
+        logger.warning(f"[refine] watchlist exclude failed: {e}")
+    try:
+        from app.routes.leads_v2 import remove_companies_from_cache
+        remove_companies_from_cache(profile_id, excludes)
+    except Exception as e:
+        logger.warning(f"[refine] leads exclude failed: {e}")
+    return removed
+
+
+async def undo_refine(profile_id: str) -> dict:
+    """Revert the last refine (swap dossier_prev back in)."""
+    p = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute()
+    sp = (p.data[0].get("search_profile") if p.data else None) or {}
+    prev = sp.get("dossier_prev")
+    if not prev:
+        return {"reply": "Nothing to undo.", "rebuilding": False}
+    sp["dossier"] = prev
+    sp.pop("dossier_prev", None)
+    supabase.table("user_profiles").update({"search_profile": sp}).eq("id", profile_id).execute()
+    return {"reply": "Reverted the last change.", "rebuilding": True}
+
+
+async def rebuild_precision(profile_id: str):
+    """Background: rebuild the precision Target List from the (updated) dossier."""
+    try:
+        p = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute()
+        dossier = ((p.data[0].get("search_profile") if p.data else None) or {}).get("dossier")
+        if dossier:
+            from app.agents.watchlist_agent import build_precision_targets
+            await build_precision_targets(profile_id, dossier)
+    except Exception as e:
+        logger.error(f"[refine] precision rebuild failed: {e}")
+
+
 async def build_seller_dossier(profile_id: str, intake: dict = None) -> dict:
     """The 'Seller Brain' — fuse website + client/dream-company research + the seller's intake
     answers into a precise targeting DOSSIER (ranked segments, anchor companies, need-signals,

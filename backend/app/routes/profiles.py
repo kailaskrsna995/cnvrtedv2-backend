@@ -11,7 +11,7 @@ Handles everything profile-related:
   DELETE /profiles/{id}        → delete profile
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 import logging
 logger = logging.getLogger(__name__)
 from app.models import ProfileCreate, ICPApproval, ICPChatMessage
@@ -252,6 +252,25 @@ async def onboard(body: dict):
         "dream_targets": brain.get("dream_targets", 0),
         "segments": brain.get("segments", []),
     }
+
+
+@router.post("/{profile_id}/refine")
+async def refine(profile_id: str, body: dict, background_tasks: BackgroundTasks):
+    """Conversational dossier editor ('Ask cnvrted'). Applies the seller's NL feedback to
+    the dossier, drops excluded companies instantly, and schedules a precision Target List
+    rebuild in the background when the change is structural. Returns {reply, rebuilding, removed}."""
+    res = await profile_agent.refine_dossier(profile_id, body.get("message", ""))
+    if res.get("rebuilding"):
+        background_tasks.add_task(profile_agent.rebuild_precision, profile_id)
+    return res
+
+
+@router.post("/{profile_id}/refine/undo")
+async def refine_undo(profile_id: str, background_tasks: BackgroundTasks):
+    res = await profile_agent.undo_refine(profile_id)
+    if res.get("rebuilding"):
+        background_tasks.add_task(profile_agent.rebuild_precision, profile_id)
+    return res
 
 
 @router.post("/{profile_id}/approve")
