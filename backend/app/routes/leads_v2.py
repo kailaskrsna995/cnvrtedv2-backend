@@ -604,7 +604,7 @@ async def get_cold_list(profile_id: str, include_dormant: bool = False):
     Hides disliked + dormant (no recent activity); liked + proven float to top."""
     r = supabase.table("watchlist_companies") \
         .select("company_name, company_domain, reason, contact_name, contact_title, "
-                "contact_linkedin, feedback, proof_url, proof_summary, is_active") \
+                "contact_linkedin, contact_email, feedback, proof_url, proof_summary, is_active") \
         .eq("profile_id", profile_id) \
         .execute()
     rows = [x for x in (r.data or []) if x.get("feedback") != "disliked"]
@@ -678,25 +678,36 @@ _coldlist_jobs: dict = {}
 
 
 async def _enrich_cold_list(profile_id: str, limit: int):
-    from app.agents.linkedin_agent import find_contact
+    """Find contacts via Apollo (name + title + email + LinkedIn) for watchlist companies
+    that have a domain. On-demand only — triggered by the 'Find contacts' button."""
+    from app.agents.apollo_agent import find_contact
     from datetime import datetime, timezone
+    # buyer titles from the dossier (fallback to a sensible generic set)
+    prof = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute()
+    dossier = ((prof.data[0].get("search_profile") if prof.data else None) or {}).get("dossier") or {}
+    titles = dossier.get("buyer_titles") or [
+        "Head of Marketing", "VP Marketing", "CMO", "Founder", "CEO",
+        "Head of Content", "Director of Marketing", "Head of Growth",
+    ]
     rows = supabase.table("watchlist_companies") \
         .select("id, company_name, company_domain, contact_name") \
         .eq("profile_id", profile_id).execute().data or []
-    todo = [r for r in rows if not r.get("contact_name")][:limit]
+    # Apollo needs a domain; only companies without a contact yet
+    todo = [r for r in rows if not r.get("contact_name") and r.get("company_domain")][:limit]
     _coldlist_jobs[profile_id] = {"status": "running", "done": 0, "total": len(todo)}
     for i, row in enumerate(todo):
         try:
-            c = await find_contact(row["company_name"], row.get("company_domain"))
-            if c:
+            c = await find_contact(row["company_name"], row.get("company_domain"), titles)
+            if c and (c.get("name") or c.get("email")):
                 supabase.table("watchlist_companies").update({
-                    "contact_name": c["name"],
-                    "contact_title": c["title"],
-                    "contact_linkedin": c["profile_url"],
+                    "contact_name": c.get("name"),
+                    "contact_title": c.get("title"),
+                    "contact_email": c.get("email"),
+                    "contact_linkedin": c.get("linkedin"),
                     "contact_checked_at": datetime.now(timezone.utc).isoformat(),
                 }).eq("id", row["id"]).execute()
         except Exception as e:
-            logger.warning(f"[coldlist] enrich failed for {row['company_name']}: {e}")
+            logger.warning(f"[coldlist] apollo enrich failed for {row['company_name']}: {e}")
         _coldlist_jobs[profile_id] = {"status": "running", "done": i + 1, "total": len(todo)}
     _coldlist_jobs[profile_id] = {"status": "done", "done": len(todo), "total": len(todo)}
 
