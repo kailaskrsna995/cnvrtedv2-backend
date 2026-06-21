@@ -74,16 +74,15 @@ Return ONLY a JSON array, no markdown:
 # Delivery-model framing — how a target qualifies depends on HOW the seller delivers.
 _DELIVERY_LINES = {
     "service_or_agency": (
-        "This seller is a SERVICE/STUDIO/AGENCY (done-for-you). Target companies that PRODUCE "
-        "high volumes of video/marketing/content and would realistically OUTSOURCE that production "
-        "to an external studio — e.g. media/streaming/OTT/audio platforms, regional content players, "
-        "publishers, and content-heavy growth-stage D2C brands. NOT companies with large in-house "
-        "studios that never outsource."
+        "This seller is a SERVICE/AGENCY/STUDIO (done-for-you). Target companies that need high volumes "
+        "of the work this seller does and would realistically OUTSOURCE it to an external provider — "
+        "companies in the seller's vertical (per the dossier segments) with the relevant execution/"
+        "production need. NOT companies with large in-house teams that never outsource."
     ),
     "self_serve_product": (
         "This seller is a SELF-SERVE PRODUCT/TOOL. Target companies/teams that would realistically "
-        "ADOPT a self-serve or mid-market tool to make content themselves — growth-stage brands, "
-        "studios, agencies, and creator-led teams with hands-on production needs."
+        "ADOPT a self-serve or mid-market tool to do this work themselves — growth-stage companies, "
+        "teams, and operators in the seller's vertical with hands-on, in-house needs."
     ),
     "marketplace_platform": (
         "This seller is a MARKETPLACE/PLATFORM. Target companies on the side the seller monetises "

@@ -66,7 +66,7 @@ Do NOT call a trigger "intent". A launch date is a trigger, not buying intent.
 
 The "why" MUST make the causal argument explicitly:
 - for trigger: event → why it creates an imminent need for THIS service → therefore worth reaching out now.
-  e.g. "Launches Aug 18 → studios produce a wave of trailers and promo in the weeks before launch → high need for fast video production right now."
+  e.g. "Just raised a Series B to expand into new markets → an imminent build/launch push → high, immediate need for exactly what this seller provides — reach out now."
 - for stated_intent: restate the ask and why it's a direct fit.
 If proof would be empty (no concrete phrase), score low.
 
@@ -156,13 +156,12 @@ seller's delivery model above (modality must match — do not pass a tool-seeker
 a studio-seeker to a tool). A STATED need ("looking for / want to hire / need someone to make X")
 is high quality. An INFERRED trigger (raised funding, launched a product) only implies a POSSIBLE
 future need — score it ≤0.55 UNLESS one of these holds:
-  (a) the trigger is explicitly about this exact service ("raised funding to scale video content"), OR
-  (b) the company itself operates in the seller's CORE vertical such that growth DIRECTLY drives this
-      need — e.g. for a video/film studio seller, a microdrama / streaming / OTT / audio-to-video /
-      media-entertainment company raising money or launching a content slate WILL scale production →
-      that's a STRONG trigger (0.7+), not a weak one.
-A generic raise by a company OUTSIDE the core vertical (a coffee brand, a fintech, a chipmaker) stays
-weak (≤0.5) — money alone doesn't mean they need THIS service.
+  (a) the trigger is explicitly about this exact service ("raised funding to scale the work this seller does"), OR
+  (b) the company operates squarely in the seller's CORE vertical (per the dossier's top segments) such
+      that growth DIRECTLY drives this need — a company in that exact vertical raising money, launching,
+      or expanding WILL need more of what this seller provides → that's a STRONG trigger (0.7+), not weak.
+A generic raise by a company OUTSIDE the seller's core vertical stays weak (≤0.5) — money alone doesn't
+mean they need THIS service.
 For company_name, extract the company OR the person's name/handle if it's an individual posting."""
 
     messages = [
@@ -226,8 +225,8 @@ real intent), but KEEP every plausible on-ICP buyer. A healthy result is ~4-8 le
 are cutting almost everything, you are being too harsh. When genuinely unsure, KEEP.
 
 DEFAULT TO KEEP for: any company squarely in the seller's CORE vertical with a real trigger or stated
-need (e.g. for a media/video studio: a streaming/OTT/microdrama/audio/content company that raised,
-launched a slate, or is hiring/seeking production) — these are exactly the target accounts, keep them
+need (a company in one of the dossier's top segments that raised, launched, expanded, or is hiring/
+seeking what this seller provides) — these are exactly the target accounts, keep them
 even if not perfectly worded.
 
 SELLER (what they offer):
@@ -246,11 +245,11 @@ For EACH candidate decide:
 - keep=false if the buyer wants the WRONG modality (wants a self-serve tool when the seller is a
   studio/agency, or wants to hire a studio when the seller is a self-serve tool).
 - keep=false for INFERRED triggers with no stated need that are also OUTSIDE the core vertical:
-  a coffee/fintech/D2C brand that just "raised money so they'll need content" is a guess, not intent.
-  BUT keep a trigger if it explicitly ties to this service (raised to scale video/content) OR the
-  company is squarely in the seller's CORE vertical where growth directly drives the need (a
-  microdrama/streaming/OTT/media-entertainment company raising or launching a slate WILL need more
-  video → keep). Core-vertical raises are leads; off-vertical raises are not.
+  an off-vertical brand that just "raised money so they'll probably need this" is a guess, not intent.
+  BUT keep a trigger if it explicitly ties to this service OR the company is squarely in the seller's
+  CORE vertical where growth directly drives the need (a company in a dossier top-segment that raised,
+  launched, or expanded WILL need more of what the seller provides → keep). Core-vertical raises are
+  leads; off-vertical raises are not.
 - keep=false if: COMPETITOR, WRONG vertical/industry, vanity milestone, or no real buying signal.
 - competitor=true if it sells/builds the same offering as the seller (set keep=false too).
 

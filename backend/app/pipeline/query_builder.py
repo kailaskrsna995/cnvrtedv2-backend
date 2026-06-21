@@ -123,8 +123,8 @@ GEO: {geo}
 Write {n} Google News queries that would surface companies in the TOP segments hitting one of the
 {kind_word} need-signals. Rules:
 - Each query under 9 words, end with 2026.
-- Use concrete industry words from the segments (e.g. "microdrama app", "vertical video platform",
-  "audio storytelling app", "regional OTT"), NOT abstract jargon.
+- Use the concrete product-category words from the segments above (the seller's actual vertical),
+  NOT abstract jargon.
 - {kind_rule}
 - No company names. No "startup" alone. No off-vertical filler.
 
@@ -135,13 +135,13 @@ _KIND_CONFIG = {
         "kind_desc": "FUNDING events (raises, rounds, acquisitions to scale content)",
         "kind_word": "funding",
         "kind_rule": 'Each query must include a funding word: "raises funding" / "Series A" / '
-                     '"Series B" / "seed round" / "acquires studio".',
+                     '"Series B" / "seed round" / "acquires".',
     },
     "news": {
         "kind_desc": "TRIGGER events (launches, exec hires, expansion, content slate)",
         "kind_word": "trigger-event",
-        "kind_rule": 'Each query must include a trigger word: "launches" / "appoints head of content" '
-                     '/ "expands into video" / "original series" / "microdrama slate".',
+        "kind_rule": 'Each query must include a trigger word: "launches" / "appoints" '
+                     '/ "expands into" / "new product" / "partners with".',
     },
 }
 

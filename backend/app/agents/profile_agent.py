@@ -508,11 +508,12 @@ RESEARCH on their real clients + dream-fit companies (what these companies ACTUA
 {research}
 
 Build the dossier with these rules:
-- core_segments: RANK the buyer segments best-fit first. Be specific (not "media" but "mobile microdrama / vertical-video streaming apps scaling original content"). fit = 1-10.
+- If the seller listed KEYWORDS in their answers, treat them as the EXACT vocabulary of their vertical — use them verbatim in core_segments, need_signals, and exa_queries.
+- core_segments: RANK the buyer segments best-fit first. Be specific to the seller's ACTUAL vertical — name the precise customer category (inferred from their clients, dream companies, and keywords), not a broad label like "media" or "SaaS". fit = 1-10.
 - anchor_companies: 6-12 REAL, specific companies that are the PUREST examples of a great customer — a mix of their actual clients and dream-fit names. These seed Exa find_similar, so they must be real and on-target.
 - need_signals: the OBSERVABLE, searchable signals that mean "this company needs the seller NOW" (funding for the exact use case, hiring a relevant role, launching a slate, expanding format/market). Not vague.
 - buyer_language: the actual words/phrases a buyer at these companies would use when they have the need.
-- exa_queries: 4-6 RICH, natural-language semantic queries an insider would run on Exa to find these companies — descriptive sentences, NOT keyword soup. e.g. "fast-growing mobile microdrama streaming apps producing serialized vertical video that recently raised funding to scale content production".
+- exa_queries: 4-6 RICH, natural-language semantic queries an insider would run on Exa to find these companies — descriptive sentences, NOT keyword soup. Each names the precise customer type (in the SELLER's own vertical + their keywords) + their situation + a recent trigger. Match the seller's vertical, not any example vertical.
 
 Return ONLY valid JSON, no markdown:
 {{
