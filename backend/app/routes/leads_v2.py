@@ -651,11 +651,14 @@ async def refresh_leads(profile_id: str):
 async def get_cold_list(profile_id: str, include_dormant: bool = False):
     """The target-company cold list (watchlist companies + contacts + proof).
     Hides disliked + dormant (no recent activity); liked + proven float to top."""
-    r = supabase.table("watchlist_companies") \
-        .select("company_name, company_domain, reason, contact_name, contact_title, "
-                "contact_linkedin, contact_email, feedback, proof_url, proof_summary, is_active") \
-        .eq("profile_id", profile_id) \
-        .execute()
+    _sel = ("company_name, company_domain, reason, contact_name, contact_title, "
+            "contact_linkedin, contact_email, contact_phone, feedback, proof_url, proof_summary, is_active")
+    try:
+        r = supabase.table("watchlist_companies").select(_sel).eq("profile_id", profile_id).execute()
+    except Exception:
+        # contact_phone column not added to the DB yet — degrade gracefully
+        r = supabase.table("watchlist_companies") \
+            .select(_sel.replace(", contact_phone", "")).eq("profile_id", profile_id).execute()
     rows = [x for x in (r.data or []) if x.get("feedback") != "disliked"]
     # dormant = explicitly checked and found inactive (e.g. defunct studio)
     if not include_dormant:
@@ -748,13 +751,20 @@ async def _enrich_cold_list(profile_id: str, limit: int):
         try:
             c = await find_contact(row["company_name"], row.get("company_domain"), titles)
             if c and (c.get("name") or c.get("email")):
-                supabase.table("watchlist_companies").update({
+                payload = {
                     "contact_name": c.get("name"),
                     "contact_title": c.get("title"),
                     "contact_email": c.get("email"),
+                    "contact_phone": c.get("phone"),
                     "contact_linkedin": c.get("linkedin"),
                     "contact_checked_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", row["id"]).execute()
+                }
+                try:
+                    supabase.table("watchlist_companies").update(payload).eq("id", row["id"]).execute()
+                except Exception:
+                    # contact_phone column not added yet — store everything else
+                    payload.pop("contact_phone", None)
+                    supabase.table("watchlist_companies").update(payload).eq("id", row["id"]).execute()
         except Exception as e:
             logger.warning(f"[coldlist] apollo enrich failed for {row['company_name']}: {e}")
         _coldlist_jobs[profile_id] = {"status": "running", "done": i + 1, "total": len(todo)}

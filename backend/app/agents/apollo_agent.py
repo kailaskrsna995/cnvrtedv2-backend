@@ -36,6 +36,22 @@ def _clean_email(e: str) -> str | None:
     return e
 
 
+def _extract_phone(p: dict) -> str | None:
+    """Best phone available on an Apollo person: revealed mobile/direct first,
+    then any listed number, then the org's number. (Mobile reveal needs
+    reveal_phone_number=True on the match + may arrive async; we take whatever
+    the synchronous response carries.)"""
+    if not p:
+        return None
+    for n in (p.get("phone_numbers") or []):
+        v = n.get("sanitized_number") or n.get("raw_number")
+        if v:
+            return v
+    org = p.get("organization") or {}
+    return (p.get("sanitized_phone") or org.get("sanitized_phone")
+            or org.get("phone") or org.get("primary_phone", {}).get("number") or None)
+
+
 async def find_contact(company_name: str, domain: str, titles: list[str]) -> dict | None:
     """Return the best POC for a company, or None. Reveals one work email (1 credit)."""
     if not APOLLO_API_KEY or not domain:
@@ -61,15 +77,20 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
             top = people[0]
 
             email = _clean_email(top.get("email"))
-            # 2. reveal email if locked (costs 1 email credit)
-            if not email and top.get("id"):
+            phone = _extract_phone(top)
+            # 2. reveal email (+ phone) if locked. Email reveal = 1 email credit;
+            #    reveal_phone_number asks Apollo for the mobile (mobile credit; may
+            #    arrive async, so we still take whatever comes back synchronously).
+            if (not email or not phone) and top.get("id"):
                 match = await http.post(f"{BASE}/people/match", headers=headers, json={
                     "id": top["id"],
                     "reveal_personal_emails": False,   # work email only
+                    "reveal_phone_number": True,
                 })
                 if match.status_code == 200:
                     person = match.json().get("person", {}) or {}
-                    email = _clean_email(person.get("email"))
+                    email = email or _clean_email(person.get("email"))
+                    phone = phone or _extract_phone(person)
                     if not top.get("linkedin_url"):
                         top["linkedin_url"] = person.get("linkedin_url")
                 else:
@@ -80,6 +101,7 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
                 "name": name or None,
                 "title": top.get("title"),
                 "email": email,
+                "phone": phone,
                 "linkedin": top.get("linkedin_url"),
             }
     except Exception as e:
