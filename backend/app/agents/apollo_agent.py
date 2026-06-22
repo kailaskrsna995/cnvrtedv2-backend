@@ -78,14 +78,13 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
 
             email = _clean_email(top.get("email"))
             phone = _extract_phone(top)
-            # 2. reveal email (+ phone) if locked. Email reveal = 1 email credit;
-            #    reveal_phone_number asks Apollo for the mobile (mobile credit; may
-            #    arrive async, so we still take whatever comes back synchronously).
-            if (not email or not phone) and top.get("id"):
+            # 2. reveal work email if locked (1 email credit). We do NOT pass
+            #    reveal_phone_number — Apollo 400s it without a webhook_url (mobiles
+            #    are delivered async). Phone stays best-effort from the response.
+            if not email and top.get("id"):
                 match = await http.post(f"{BASE}/people/match", headers=headers, json={
                     "id": top["id"],
                     "reveal_personal_emails": False,   # work email only
-                    "reveal_phone_number": True,
                 })
                 if match.status_code == 200:
                     person = match.json().get("person", {}) or {}

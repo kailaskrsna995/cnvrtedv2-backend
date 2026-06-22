@@ -755,10 +755,12 @@ async def _enrich_cold_list(profile_id: str, limit: int):
         "Head of Content", "Director of Marketing", "Head of Growth",
     ]
     rows = supabase.table("watchlist_companies") \
-        .select("id, company_name, company_domain, contact_name") \
+        .select("id, company_name, company_domain, contact_name, contact_email") \
         .eq("profile_id", profile_id).execute().data or []
-    # Apollo needs a domain; only companies without a contact yet
-    todo = [r for r in rows if not r.get("contact_name") and r.get("company_domain")][:limit]
+    # Apollo needs a domain. Enrich companies with no contact yet OR a contact that
+    # still has no email — backfills rows stuck with name-only from the broken run.
+    todo = [r for r in rows if r.get("company_domain")
+            and (not r.get("contact_name") or not r.get("contact_email"))][:limit]
     _coldlist_jobs[profile_id] = {"status": "running", "done": 0, "total": len(todo)}
     for i, row in enumerate(todo):
         try:
