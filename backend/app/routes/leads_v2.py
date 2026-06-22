@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import json
+import uuid as _uuid
 from fastapi import APIRouter, BackgroundTasks
 from app.database import supabase
 from app.pipeline.assembly import assemble_list
@@ -18,6 +19,16 @@ from app.models import LeadStatusUpdate
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads/v2", tags=["leads_v2"])
+
+
+def _is_uuid(s: str) -> bool:
+    """Guard: a malformed profile_id (e.g. a stale ?profile= in the URL) must not
+    500 the endpoint with a Postgres 'invalid uuid' error — return empty instead."""
+    try:
+        _uuid.UUID(str(s))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 # In-memory store for background job results
 # { profile_id: { status, leads, error, total, passed } }
@@ -651,6 +662,8 @@ async def refresh_leads(profile_id: str):
 async def get_cold_list(profile_id: str, include_dormant: bool = False):
     """The target-company cold list (watchlist companies + contacts + proof).
     Hides disliked + dormant (no recent activity); liked + proven float to top."""
+    if not _is_uuid(profile_id):
+        return {"total": 0, "with_contact": 0, "with_proof": 0, "companies": []}
     _sel = ("company_name, company_domain, reason, contact_name, contact_title, "
             "contact_linkedin, contact_email, contact_phone, feedback, proof_url, proof_summary, is_active")
     try:
@@ -818,12 +831,16 @@ async def export_notion(profile_id: str, body: dict):
 
 @router.get("/competitors/{profile_id}")
 async def list_competitors(profile_id: str):
+    if not _is_uuid(profile_id):
+        return {"competitors": []}
     r = supabase.table("competitors").select("name, url").eq("profile_id", profile_id).execute()
     return {"competitors": r.data or []}
 
 
 @router.get("/clients/{profile_id}")
 async def list_clients(profile_id: str):
+    if not _is_uuid(profile_id):
+        return {"clients": []}
     result = supabase.table("existing_clients") \
         .select("id, company_name, company_domain") \
         .eq("profile_id", profile_id).execute()
