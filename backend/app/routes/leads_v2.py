@@ -75,9 +75,52 @@ def _load_results_db(profile_id: str):
     return None
 
 
+_LEAD_FIELDS = (
+    "company_name", "company_domain", "funding_round", "funding_amount", "summary",
+    "source_url", "signal_type", "source_platform", "intent_score", "match_score",
+    "why", "proof", "evidence_type", "passed", "outreach", "signal_count", "source_query",
+)
+
+
+def _prim(v):
+    return v if isinstance(v, (str, int, float, bool)) or v is None else str(v)
+
+
+def _safe_lead(l: dict) -> dict:
+    d = {k: l.get(k) for k in _LEAD_FIELDS}
+    dst = l.get("distinct_signal_types")
+    d["distinct_signal_types"] = list(dst) if isinstance(dst, (list, tuple, set)) else []
+    d["sources"] = [
+        {"url": s.get("url"), "summary": s.get("summary"), "signal_type": s.get("signal_type")}
+        for s in (l.get("sources") or []) if isinstance(s, dict)
+    ]
+    return d
+
+
+def _safe_payload(data: dict) -> dict:
+    """Rebuild a clean, primitive-only copy of a run result — no shared/cyclic refs, bounded
+    depth — so persistence can never recurse/fail regardless of what the pipeline produced."""
+    stages = ((data.get("pipeline") or {}).get("stages")) or []
+    return {
+        "status": data.get("status"),
+        "leads": [_safe_lead(l) for l in (data.get("leads") or []) if isinstance(l, dict)],
+        "all": [_safe_lead(l) for l in (data.get("all") or []) if isinstance(l, dict)],
+        "total_signals": data.get("total_signals"),
+        "filtered": data.get("filtered"),
+        "passed": data.get("passed"),
+        "pipeline": {"stages": [
+            {"name": s.get("name"), "status": s.get("status"), "error": s.get("error"),
+             "detail": {k: _prim(v) for k, v in (s.get("detail") or {}).items()}}
+            for s in stages if isinstance(s, dict)
+        ]},
+        "error": data.get("error"),
+    }
+
+
 def _persist_results(profile_id: str, data: dict):
-    _persist_results(profile_id, data)   # disk — fast, same-deploy
-    _save_results_db(profile_id, data)      # DB — durable across deploys
+    safe = _safe_payload(data)               # primitive-only — can't recurse
+    _save_results_cache(profile_id, safe)    # disk — fast, same-deploy
+    _save_results_db(profile_id, safe)       # DB — durable across deploys
 
 
 def _load_results_any(profile_id: str):

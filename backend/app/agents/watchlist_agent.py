@@ -185,7 +185,7 @@ async def build_precision_targets(profile_id: str, dossier: dict, max_per_query:
             seen.add(dom); seen.add(nl)
             rows.append({
                 "profile_id": profile_id, "company_name": name, "company_domain": dom,
-                "reason": f"precision match: {q[:60]}", "source": "precision_exa",
+                "reason": f"precision match: {q[:200]}", "source": "precision_exa",
             })
 
     if rows:
