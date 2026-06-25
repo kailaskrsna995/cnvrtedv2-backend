@@ -859,6 +859,60 @@ async def intent_enrich_status(profile_id: str):
     return _intent_enrich_jobs.get(profile_id, {"status": "idle"})
 
 
+# ── Company-lead contact enrichment — decision-maker at the company (Apollo by domain) ──
+_company_enrich_jobs: dict = {}
+
+
+async def _enrich_company(profile_id: str, limit: int):
+    """For each company lead that has a domain, find the most-senior buyer-fit contact
+    via Apollo (name/title/email/LinkedIn/phone). Attaches to the cached lead + persists."""
+    from app.agents.apollo_agent import find_contact
+    prof = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute()
+    dossier = ((prof.data[0].get("search_profile") if prof.data else None) or {}).get("dossier") or {}
+    titles = dossier.get("buyer_titles") or [
+        "Head of Marketing", "VP Marketing", "CMO", "Founder", "CEO",
+        "Head of Content", "Director of Marketing", "Head of Growth",
+    ]
+    data = _load_results_any(profile_id)
+    leads = (data or {}).get("leads") or []
+    # company leads = trigger-type (not stated_intent), with a domain, no contact yet
+    todo = [l for l in leads
+            if l.get("evidence_type") != "stated_intent"
+            and not l.get("contact_name") and l.get("company_domain")][:limit]
+    _company_enrich_jobs[profile_id] = {"status": "running", "done": 0, "total": len(todo)}
+    for i, l in enumerate(todo):
+        try:
+            c = await find_contact(l.get("company_name"), l.get("company_domain"), titles)
+            if c and (c.get("name") or c.get("email")):
+                l["contact_name"] = c.get("name")
+                l["contact_title"] = c.get("title")
+                l["contact_email"] = c.get("email")
+                l["contact_phone"] = c.get("phone")
+                l["contact_linkedin"] = c.get("linkedin")
+        except Exception as e:
+            logger.warning(f"[company-enrich] apollo failed for {l.get('company_name')}: {e}")
+        _company_enrich_jobs[profile_id] = {"status": "running", "done": i + 1, "total": len(todo)}
+    if data:
+        _job_store[profile_id] = data
+        _persist_results(profile_id, data)
+    _company_enrich_jobs[profile_id] = {"status": "done", "done": len(todo), "total": len(todo)}
+
+
+@router.post("/{profile_id}/enrich-company")
+async def enrich_company_contacts(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20):
+    if not _is_uuid(profile_id):
+        return {"status": "idle"}
+    if _company_enrich_jobs.get(profile_id, {}).get("status") == "running":
+        return {"status": "already_running", **_company_enrich_jobs[profile_id]}
+    background_tasks.add_task(_enrich_company, profile_id, limit)
+    return {"status": "started"}
+
+
+@router.get("/{profile_id}/enrich-company-status")
+async def company_enrich_status(profile_id: str):
+    return _company_enrich_jobs.get(profile_id, {"status": "idle"})
+
+
 @router.post("/{profile_id}/remove-lead")
 async def remove_lead(profile_id: str, body: dict):
     """Manually remove a single lead from the cached run (the X button on a row)."""
