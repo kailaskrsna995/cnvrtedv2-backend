@@ -11,6 +11,7 @@ Flow (on-demand only — wired to the "Find contacts" button, NEVER auto during 
 """
 
 import logging
+import re
 import httpx
 from app.config import APOLLO_API_KEY
 
@@ -105,4 +106,57 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
             }
     except Exception as e:
         logger.error(f"[apollo] find_contact failed for {domain}: {e}")
+        return None
+
+
+def linkedin_profile_from_post(url: str) -> str | None:
+    """Derive the AUTHOR's profile URL from a LinkedIn post/permalink:
+    linkedin.com/posts/{slug}_... → linkedin.com/in/{slug}. Returns None when the
+    URL carries no author slug (e.g. /feed/update/urn:li:activity:...)."""
+    if not url:
+        return None
+    m = re.search(r"linkedin\.com/posts/([^_/?#]+)_", url)
+    if m:
+        return f"https://www.linkedin.com/in/{m.group(1)}"
+    m = re.search(r"linkedin\.com/in/([^/?#]+)", url)
+    if m:
+        return f"https://www.linkedin.com/in/{m.group(1)}"
+    return None
+
+
+async def find_person_by_linkedin(linkedin_url: str) -> dict | None:
+    """Match a specific person by their LinkedIn profile URL and reveal their work
+    email — used to find the AUTHOR of a LinkedIn intent post. Reveals 1 email credit."""
+    if not APOLLO_API_KEY or not linkedin_url:
+        return None
+    headers = {"X-Api-Key": APOLLO_API_KEY, "Content-Type": "application/json", "Cache-Control": "no-cache"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as http:
+            match = await http.post(f"{BASE}/people/match", headers=headers, json={
+                "linkedin_url": linkedin_url,
+                "reveal_personal_emails": False,   # work email only
+            })
+            if match.status_code != 200:
+                logger.warning(f"[apollo] linkedin match {match.status_code}: {match.text[:160]}")
+                return None
+            person = match.json().get("person") or {}
+            if not person:
+                return None
+            email = _clean_email(person.get("email"))
+            name = person.get("name") or f"{person.get('first_name','')} {person.get('last_name','')}".strip()
+            title = person.get("title")
+            org = (person.get("organization") or {}).get("name")
+            if title and org and org.lower() not in title.lower():
+                title = f"{title}, {org}"
+            elif not title and org:
+                title = org
+            return {
+                "name": name or None,
+                "title": title,
+                "email": email,
+                "phone": _extract_phone(person),
+                "linkedin": person.get("linkedin_url") or linkedin_url,
+            }
+    except Exception as e:
+        logger.error(f"[apollo] find_person_by_linkedin failed for {linkedin_url}: {e}")
         return None

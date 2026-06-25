@@ -90,6 +90,8 @@ _LEAD_FIELDS = (
     "company_name", "company_domain", "funding_round", "funding_amount", "summary",
     "source_url", "signal_type", "source_platform", "intent_score", "match_score",
     "why", "proof", "evidence_type", "passed", "outreach", "signal_count", "source_query",
+    # contact enrichment attached on-demand (Apollo) — must survive persistence
+    "contact_name", "contact_title", "contact_email", "contact_phone", "contact_linkedin",
 )
 
 
@@ -798,6 +800,63 @@ async def enrich_cold_list(profile_id: str, background_tasks: BackgroundTasks, l
 @router.get("/coldlist/{profile_id}/enrich-status")
 async def cold_list_enrich_status(profile_id: str):
     return _coldlist_jobs.get(profile_id, {"status": "idle"})
+
+
+# ── Intent-lead contact enrichment — find the LinkedIn POSTER (the author) ─────
+_intent_enrich_jobs: dict = {}
+
+
+async def _enrich_intent(profile_id: str, limit: int):
+    """For each LinkedIn intent lead, derive the author's profile from the post URL
+    and match them in Apollo (name/title/email/LinkedIn). Attaches contact fields to
+    the cached lead + persists. On-demand only (the 'Find contacts' button)."""
+    from app.agents.apollo_agent import find_person_by_linkedin, linkedin_profile_from_post
+    data = _load_results_any(profile_id)
+    leads = (data or {}).get("leads") or []
+    todo = []
+    for l in leads:
+        if l.get("evidence_type") != "stated_intent" or l.get("contact_name"):
+            continue
+        url = l.get("source_url") or ""
+        plat = (l.get("source_platform") or "").lower()
+        if "linkedin" not in plat and "linkedin.com" not in url:
+            continue
+        prof = linkedin_profile_from_post(url)
+        if prof:
+            todo.append((l, prof))
+    todo = todo[:limit]
+    _intent_enrich_jobs[profile_id] = {"status": "running", "done": 0, "total": len(todo)}
+    for i, (l, prof) in enumerate(todo):
+        try:
+            c = await find_person_by_linkedin(prof)
+            if c and (c.get("name") or c.get("email")):
+                l["contact_name"] = c.get("name")
+                l["contact_title"] = c.get("title")
+                l["contact_email"] = c.get("email")
+                l["contact_phone"] = c.get("phone")
+                l["contact_linkedin"] = c.get("linkedin")
+        except Exception as e:
+            logger.warning(f"[intent-enrich] apollo failed for {prof}: {e}")
+        _intent_enrich_jobs[profile_id] = {"status": "running", "done": i + 1, "total": len(todo)}
+    if data:
+        _job_store[profile_id] = data          # so /results returns enriched leads now
+        _persist_results(profile_id, data)     # survive restart (contacts are whitelisted)
+    _intent_enrich_jobs[profile_id] = {"status": "done", "done": len(todo), "total": len(todo)}
+
+
+@router.post("/{profile_id}/enrich-intent")
+async def enrich_intent_contacts(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20):
+    if not _is_uuid(profile_id):
+        return {"status": "idle"}
+    if _intent_enrich_jobs.get(profile_id, {}).get("status") == "running":
+        return {"status": "already_running", **_intent_enrich_jobs[profile_id]}
+    background_tasks.add_task(_enrich_intent, profile_id, limit)
+    return {"status": "started"}
+
+
+@router.get("/{profile_id}/enrich-intent-status")
+async def intent_enrich_status(profile_id: str):
+    return _intent_enrich_jobs.get(profile_id, {"status": "idle"})
 
 
 @router.post("/{profile_id}/remove-lead")
