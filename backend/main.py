@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # V2 routes
+from app.routes.auth_route import router as auth_router
 from app.routes.profiles import router as profiles_router
 from app.routes.agents_route import router as agents_router
 from app.routes.leads_v2 import router as leads_router
@@ -28,6 +29,7 @@ app.add_middleware(
 )
 
 # Register routes
+app.include_router(auth_router)
 app.include_router(profiles_router)
 app.include_router(agents_router)
 app.include_router(leads_router)

@@ -39,3 +39,23 @@ APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", "")
 VECTOR_SIMILARITY_THRESHOLD = float(os.getenv("VECTOR_SIMILARITY_THRESHOLD", "0.70"))
 INTENT_SCORE_THRESHOLD = float(os.getenv("INTENT_SCORE_THRESHOLD", "0.60"))
 MAX_LEADS_PER_DAY = int(os.getenv("MAX_LEADS_PER_DAY", "20"))
+
+# ── Auth / multi-tenancy ────────────────────────────────────────────────
+# JWT signing secret — MUST be overridden in prod (Railway env). If this default
+# is ever used in prod, tokens are forgeable. Set a long random JWT_SECRET.
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-insecure-change-me")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "12"))
+
+# Founder accounts — bypass the per-day run cap AND can see every profile.
+ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in os.getenv(
+        "ADMIN_EMAILS",
+        "kailas@cnvrted.com,sharan@cnvrted.com,dhruv@cnvrted.com,vishnu@cnvrted.com",
+    ).split(",")
+    if e.strip()
+}
+
+# Per-user daily scan cap (non-admins). Durable via the scan_runs table.
+MAX_SCANS_PER_DAY = int(os.getenv("MAX_SCANS_PER_DAY", "2"))

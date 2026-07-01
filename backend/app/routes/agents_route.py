@@ -6,12 +6,13 @@ AGENTS ROUTES
   GET  /agents/queue           → how many signals are currently in queue
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime, timedelta
 from app.models import AgentTriggerRequest
 from app.database import supabase
 from app.queue import signal_queue
 from app.agents import reddit_agent, funding_agent, hiring_agent, buyer_intent_agent, news_agent
+from app.auth import get_current_user, assert_owner
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -22,12 +23,13 @@ TRIGGER_COOLDOWN_MINUTES = 60
 
 
 @router.post("/trigger")
-async def trigger_agents(body: AgentTriggerRequest):
+async def trigger_agents(body: AgentTriggerRequest, user: dict = Depends(get_current_user)):
     """
     Manual Run Now. Enforces 1 trigger per profile per hour.
     Runs all 5 agents (or subset if agent_names specified).
     """
     profile_id = body.profile_id
+    assert_owner(profile_id, user)
     now = datetime.utcnow()
 
     # Rate limit check
@@ -69,7 +71,7 @@ async def trigger_agents(body: AgentTriggerRequest):
 
 
 @router.get("/status")
-async def get_agent_status():
+async def get_agent_status(user: dict = Depends(get_current_user)):
     """Return last run stats for each agent."""
     result = supabase.table("agent_runs") \
         .select("agent_name, status, signals_found, started_at, completed_at, error_message") \
@@ -80,6 +82,6 @@ async def get_agent_status():
 
 
 @router.get("/queue")
-async def get_queue_size():
+async def get_queue_size(user: dict = Depends(get_current_user)):
     """How many signals are waiting to be processed."""
     return {"queue_size": signal_queue.size()}

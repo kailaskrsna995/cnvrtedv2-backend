@@ -11,22 +11,23 @@ Handles everything profile-related:
   DELETE /profiles/{id}        → delete profile
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 import logging
 logger = logging.getLogger(__name__)
 from app.models import ProfileCreate, ICPApproval, ICPChatMessage
 from app.database import supabase
 from app.agents import profile_agent
+from app.auth import get_current_user, owned_profile
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
 
 @router.post("/save-icp")
-async def save_icp_to_db(body: dict):
+async def save_icp_to_db(body: dict, user: dict = Depends(get_current_user)):
     """
     Save chosen ICP to DB and generate vector.
     Called when user clicks 'Use this' on onboarding.
-    Creates a user + profile if they don't exist yet.
+    The profile is owned by the logged-in user.
     """
     try:
         website_url = body.get("website_url", "")
@@ -35,13 +36,9 @@ async def save_icp_to_db(body: dict):
         target_description = body.get("target_description", "")
         chosen_icp_text = body.get("chosen_icp_text", "")
         user_context = body.get("user_context", "")
-        email = body.get("email", "user@local.dev")
 
-        # 1. Upsert user
-        user_result = supabase.table("users").upsert(
-            {"email": email}, on_conflict="email"
-        ).execute()
-        user_id = user_result.data[0]["id"]
+        # 1. Owned by the authenticated user
+        user_id = user["id"]
 
         # 2. Generate ICP vector + search facets
         from app.pipeline.matching import vectorise_text
@@ -80,7 +77,7 @@ async def save_icp_to_db(body: dict):
 
 
 @router.post("/generate-icp")
-async def generate_icp_no_db(body: ProfileCreate):
+async def generate_icp_no_db(body: ProfileCreate, user: dict = Depends(get_current_user)):
     """
     Generate 3 ICP options without writing to DB.
     Use this for local testing before Supabase is set up.
@@ -126,14 +123,14 @@ async def generate_icp_no_db(body: ProfileCreate):
 
 
 @router.post("/")
-async def create_profile(body: ProfileCreate):
+async def create_profile(body: ProfileCreate, user: dict = Depends(get_current_user)):
     """
     Create a new profile and kick off the Profile Agent.
     Returns the 3 ICP options for user to choose from.
     """
-    # 1. Create profile row
+    # 1. Create profile row — owned by the logged-in user
     result = supabase.table("user_profiles").insert({
-        "user_id":             body.user_id,
+        "user_id":             user["id"],
         "name":                body.name,
         "website_url":         body.website_url,
         "linkedin_url":        body.linkedin_url,
@@ -154,17 +151,21 @@ async def create_profile(body: ProfileCreate):
 
 
 @router.get("/list")
-async def list_all_profiles():
-    """All profiles (single-tenant demo) — powers the workspace switcher dropdown.
-    Newest first so a freshly-onboarded demo profile is at the top."""
-    r = supabase.table("user_profiles").select("id, name, created_at") \
-        .order("created_at", desc=True).limit(40).execute()
+async def list_all_profiles(user: dict = Depends(get_current_user)):
+    """The caller's own profiles — powers the workspace switcher dropdown.
+    Admins (founders) see every profile. Newest first."""
+    q = supabase.table("user_profiles").select("id, name, created_at")
+    if not user.get("is_admin"):
+        q = q.eq("user_id", user["id"])
+    r = q.order("created_at", desc=True).limit(40).execute()
     return [{"id": p["id"], "name": p.get("name") or "Untitled"} for p in (r.data or [])]
 
 
 @router.get("/{user_id}/all")
-async def list_profiles(user_id: str):
-    """Return all profiles for a user."""
+async def list_profiles(user_id: str, user: dict = Depends(get_current_user)):
+    """Return all profiles for a user (only your own, unless admin)."""
+    if not user.get("is_admin") and user_id != user["id"]:
+        raise HTTPException(403, "You don't have access to these profiles.")
     result = supabase.table("user_profiles") \
         .select("id, name, service_description, is_active, created_at") \
         .eq("user_id", user_id) \
@@ -174,7 +175,7 @@ async def list_profiles(user_id: str):
 
 
 @router.post("/{profile_id}/seller-brain")
-async def seller_brain(profile_id: str, body: dict):
+async def seller_brain(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     """Run the SELLER BRAIN from the intake answers (the 8 questions + dream companies):
     builds the deep dossier, persists it, and builds the precision Target List + dream targets.
     Body = the intake dict (or {"intake": {...}}). Takes ~30-60s."""
@@ -194,22 +195,22 @@ async def seller_brain(profile_id: str, body: dict):
 
 
 @router.post("/onboard")
-async def onboard(body: dict):
+async def onboard(body: dict, user: dict = Depends(get_current_user)):
     """FULL onboarding from scratch (basic UI posts here):
     { username, website_url, intake: {the 8 questions + dream_companies} }
-    → creates a user+profile keyed by username, synthesizes ICP context + vector + search
-    facets, stores best_clients as exclusions, then runs the Seller Brain (dossier +
+    → creates a profile OWNED BY THE LOGGED-IN USER, synthesizes ICP context + vector +
+    search facets, stores best_clients as exclusions, then runs the Seller Brain (dossier +
     precision Target List). Returns the new profile_id. ~60-90s."""
     username = (body.get("username") or "").strip()
     website_url = (body.get("website_url") or "").strip()
     intake = body.get("intake") or {}
-    if not username or not website_url:
-        raise HTTPException(status_code=400, detail="username and website_url are required")
+    if not website_url:
+        raise HTTPException(status_code=400, detail="website_url is required")
 
-    # 1. user — keyed by username (gives us control over profiles)
-    email = username if "@" in username else f"{username}@cnvrted.app"
-    user = supabase.table("users").upsert({"email": email}, on_conflict="email").execute()
-    user_id = user.data[0]["id"]
+    # 1. owned by the authenticated account; username is just the profile label
+    user_id = user["id"]
+    if not username:
+        username = (user.get("email") or "My Profile").split("@")[0]
 
     # 2. synthesize ICP context from the intake answers
     icp_text = " | ".join(x for x in [
@@ -264,7 +265,7 @@ async def onboard(body: dict):
 
 
 @router.post("/{profile_id}/refine")
-async def refine(profile_id: str, body: dict, background_tasks: BackgroundTasks):
+async def refine(profile_id: str, body: dict, background_tasks: BackgroundTasks, user: dict = Depends(owned_profile)):
     """Conversational dossier editor ('Ask cnvrted'). Applies the seller's NL feedback to
     the dossier, drops excluded companies instantly, and schedules a precision Target List
     rebuild in the background when the change is structural. Returns {reply, rebuilding, removed}."""
@@ -275,7 +276,7 @@ async def refine(profile_id: str, body: dict, background_tasks: BackgroundTasks)
 
 
 @router.post("/{profile_id}/refine/undo")
-async def refine_undo(profile_id: str, background_tasks: BackgroundTasks):
+async def refine_undo(profile_id: str, background_tasks: BackgroundTasks, user: dict = Depends(owned_profile)):
     res = await profile_agent.undo_refine(profile_id)
     if res.get("rebuilding"):
         background_tasks.add_task(profile_agent.rebuild_precision, profile_id)
@@ -283,14 +284,14 @@ async def refine_undo(profile_id: str, background_tasks: BackgroundTasks):
 
 
 @router.post("/{profile_id}/approve")
-async def approve_icp(profile_id: str, body: ICPApproval):
+async def approve_icp(profile_id: str, body: ICPApproval, user: dict = Depends(owned_profile)):
     """User picked an ICP option. Store it and generate vector."""
     result = await profile_agent.approve_icp(profile_id, body.chosen_icp_text)
     return result
 
 
 @router.post("/{profile_id}/chat")
-async def icp_chat(profile_id: str, body: ICPChatMessage):
+async def icp_chat(profile_id: str, body: ICPChatMessage, user: dict = Depends(owned_profile)):
     """
     ICP building chatbot — when user rejects all 3 options.
     Claude asks questions, builds custom ICP collaboratively.
@@ -302,13 +303,13 @@ async def icp_chat(profile_id: str, body: ICPChatMessage):
 
 
 @router.put("/{profile_id}")
-async def update_profile(profile_id: str, body: dict):
+async def update_profile(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     """Update profile fields. Re-runs Profile Agent if ICP-related fields change."""
     supabase.table("user_profiles").update(body).eq("id", profile_id).execute()
     return {"status": "updated"}
 
 
 @router.delete("/{profile_id}")
-async def delete_profile(profile_id: str):
+async def delete_profile(profile_id: str, user: dict = Depends(owned_profile)):
     supabase.table("user_profiles").delete().eq("id", profile_id).execute()
     return {"status": "deleted"}

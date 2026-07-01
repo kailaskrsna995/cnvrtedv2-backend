@@ -12,13 +12,35 @@ import logging
 import os
 import json
 import uuid as _uuid
-from fastapi import APIRouter, BackgroundTasks
+import datetime as _dt
+from fastapi import APIRouter, BackgroundTasks, Depends
 from app.database import supabase
 from app.pipeline.assembly import assemble_list
 from app.models import LeadStatusUpdate
+from app.auth import owned_profile, get_current_user
+from app.config import MAX_SCANS_PER_DAY
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads/v2", tags=["leads_v2"])
+
+
+def _scans_today(user_id: str) -> int:
+    """How many runs this user has triggered since UTC midnight (durable, from scan_runs)."""
+    start = _dt.datetime.now(_dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        r = supabase.table("scan_runs").select("id", count="exact") \
+            .eq("user_id", user_id).gte("created_at", start.isoformat()).execute()
+        return r.count or 0
+    except Exception as e:
+        logger.warning(f"[ratelimit] count failed (allowing run): {e}")
+        return 0
+
+
+def _record_scan(user_id: str, profile_id: str):
+    try:
+        supabase.table("scan_runs").insert({"user_id": user_id, "profile_id": profile_id}).execute()
+    except Exception as e:
+        logger.warning(f"[ratelimit] record failed: {e}")
 
 
 def _is_uuid(s: str) -> bool:
@@ -623,17 +645,24 @@ async def _run_agent_and_score(profile_id: str):
 
 
 @router.post("/run/{profile_id}")
-async def trigger_run(profile_id: str, background_tasks: BackgroundTasks):
-    """Trigger agent + scoring in background. Returns immediately."""
+async def trigger_run(profile_id: str, background_tasks: BackgroundTasks,
+                      user: dict = Depends(owned_profile)):
+    """Trigger agent + scoring in background. Returns immediately.
+    Enforces the per-user daily scan cap (admins bypass)."""
     if _job_store.get(profile_id, {}).get("status") == "running":
         return {"status": "already_running"}
+    if not user.get("is_admin"):
+        used = _scans_today(user["id"])
+        if used >= MAX_SCANS_PER_DAY:
+            return {"status": "rate_limited", "used": used, "limit": MAX_SCANS_PER_DAY}
+    _record_scan(user["id"], profile_id)
     _job_store[profile_id] = {"status": "running", "leads": []}
     background_tasks.add_task(_run_agent_and_score, profile_id)
     return {"status": "started"}
 
 
 @router.get("/results/{profile_id}")
-async def get_results(profile_id: str):
+async def get_results(profile_id: str, user: dict = Depends(owned_profile)):
     """Poll this to get results after triggering a run.
     Falls back to the disk cache (last completed run) when memory is empty —
     so a backend restart doesn't blank the dashboard."""
@@ -647,7 +676,7 @@ async def get_results(profile_id: str):
 
 
 @router.get("/{profile_id}")
-async def get_leads(profile_id: str):
+async def get_leads(profile_id: str, user: dict = Depends(owned_profile)):
     leads = await assemble_list(profile_id)
     live = [l for l in leads if l.get("signal_type") != "icp_match"]
     warm = [l for l in leads if l.get("signal_type") == "icp_match"]
@@ -655,13 +684,13 @@ async def get_leads(profile_id: str):
 
 
 @router.post("/{profile_id}/refresh")
-async def refresh_leads(profile_id: str):
+async def refresh_leads(profile_id: str, user: dict = Depends(owned_profile)):
     leads = await assemble_list(profile_id)
     return {"total": len(leads), "leads": leads}
 
 
 @router.get("/coldlist/{profile_id}")
-async def get_cold_list(profile_id: str, include_dormant: bool = False):
+async def get_cold_list(profile_id: str, include_dormant: bool = False, user: dict = Depends(owned_profile)):
     """The target-company cold list (watchlist companies + contacts + proof).
     Hides disliked + dormant (no recent activity); liked + proven float to top."""
     if not _is_uuid(profile_id):
@@ -715,7 +744,7 @@ async def _run_validate(profile_id: str):
 
 
 @router.post("/coldlist/{profile_id}/validate")
-async def validate_cold_list(profile_id: str, background_tasks: BackgroundTasks):
+async def validate_cold_list(profile_id: str, background_tasks: BackgroundTasks, user: dict = Depends(owned_profile)):
     """Check every watchlist company for recent activity → proof or drop-if-dormant."""
     if _validate_jobs.get(profile_id, {}).get("status") == "running":
         return {"status": "already_running"}
@@ -724,12 +753,12 @@ async def validate_cold_list(profile_id: str, background_tasks: BackgroundTasks)
 
 
 @router.get("/coldlist/{profile_id}/validate-status")
-async def validate_status(profile_id: str):
+async def validate_status(profile_id: str, user: dict = Depends(owned_profile)):
     return _validate_jobs.get(profile_id, {"status": "idle"})
 
 
 @router.post("/coldlist/{profile_id}/feedback")
-async def coldlist_feedback(profile_id: str, body: dict):
+async def coldlist_feedback(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     """Record like/dislike on a watchlist company (grows-with-user loop)."""
     name = body.get("company_name")
     fb = body.get("feedback")  # 'liked' | 'disliked' | null (clear)
@@ -789,7 +818,7 @@ async def _enrich_cold_list(profile_id: str, limit: int):
 
 
 @router.post("/coldlist/{profile_id}/enrich")
-async def enrich_cold_list(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20):
+async def enrich_cold_list(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20, user: dict = Depends(owned_profile)):
     """Find decision-maker contacts for watchlist companies (background, cached)."""
     if _coldlist_jobs.get(profile_id, {}).get("status") == "running":
         return {"status": "already_running", **_coldlist_jobs[profile_id]}
@@ -798,7 +827,7 @@ async def enrich_cold_list(profile_id: str, background_tasks: BackgroundTasks, l
 
 
 @router.get("/coldlist/{profile_id}/enrich-status")
-async def cold_list_enrich_status(profile_id: str):
+async def cold_list_enrich_status(profile_id: str, user: dict = Depends(owned_profile)):
     return _coldlist_jobs.get(profile_id, {"status": "idle"})
 
 
@@ -845,7 +874,7 @@ async def _enrich_intent(profile_id: str, limit: int):
 
 
 @router.post("/{profile_id}/enrich-intent")
-async def enrich_intent_contacts(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20):
+async def enrich_intent_contacts(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20, user: dict = Depends(owned_profile)):
     if not _is_uuid(profile_id):
         return {"status": "idle"}
     if _intent_enrich_jobs.get(profile_id, {}).get("status") == "running":
@@ -855,7 +884,7 @@ async def enrich_intent_contacts(profile_id: str, background_tasks: BackgroundTa
 
 
 @router.get("/{profile_id}/enrich-intent-status")
-async def intent_enrich_status(profile_id: str):
+async def intent_enrich_status(profile_id: str, user: dict = Depends(owned_profile)):
     return _intent_enrich_jobs.get(profile_id, {"status": "idle"})
 
 
@@ -899,7 +928,7 @@ async def _enrich_company(profile_id: str, limit: int):
 
 
 @router.post("/{profile_id}/enrich-company")
-async def enrich_company_contacts(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20):
+async def enrich_company_contacts(profile_id: str, background_tasks: BackgroundTasks, limit: int = 20, user: dict = Depends(owned_profile)):
     if not _is_uuid(profile_id):
         return {"status": "idle"}
     if _company_enrich_jobs.get(profile_id, {}).get("status") == "running":
@@ -909,12 +938,12 @@ async def enrich_company_contacts(profile_id: str, background_tasks: BackgroundT
 
 
 @router.get("/{profile_id}/enrich-company-status")
-async def company_enrich_status(profile_id: str):
+async def company_enrich_status(profile_id: str, user: dict = Depends(owned_profile)):
     return _company_enrich_jobs.get(profile_id, {"status": "idle"})
 
 
 @router.post("/{profile_id}/remove-lead")
-async def remove_lead(profile_id: str, body: dict):
+async def remove_lead(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     """Manually remove a single lead from the cached run (the X button on a row)."""
     name = (body.get("company_name") or "").strip().lower()
     if not name:
@@ -933,7 +962,7 @@ async def remove_lead(profile_id: str, body: dict):
 
 
 @router.post("/{profile_id}/export-notion")
-async def export_notion(profile_id: str, body: dict):
+async def export_notion(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     """Export the current list into the founder's Notion as a new database. Body =
     { title, columns:[{name,type}], rows:[{colName:value}] }. Returns {url, written}."""
     from app.agents.notion_export import export_to_notion
@@ -945,7 +974,7 @@ async def export_notion(profile_id: str, body: dict):
 
 
 @router.get("/competitors/{profile_id}")
-async def list_competitors(profile_id: str):
+async def list_competitors(profile_id: str, user: dict = Depends(owned_profile)):
     if not _is_uuid(profile_id):
         return {"competitors": []}
     r = supabase.table("competitors").select("name, url").eq("profile_id", profile_id).execute()
@@ -953,7 +982,7 @@ async def list_competitors(profile_id: str):
 
 
 @router.get("/clients/{profile_id}")
-async def list_clients(profile_id: str):
+async def list_clients(profile_id: str, user: dict = Depends(owned_profile)):
     if not _is_uuid(profile_id):
         return {"clients": []}
     result = supabase.table("existing_clients") \
@@ -963,7 +992,7 @@ async def list_clients(profile_id: str):
 
 
 @router.post("/clients/{profile_id}")
-async def add_client(profile_id: str, body: dict):
+async def add_client(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     name = (body.get("company_name") or "").strip() or None
     domain = (body.get("company_domain") or "").strip().lower() or None
     if not name and not domain:
@@ -974,13 +1003,13 @@ async def add_client(profile_id: str, body: dict):
 
 
 @router.delete("/clients/{client_id}")
-async def remove_client(client_id: str):
+async def remove_client(client_id: str, user: dict = Depends(get_current_user)):
     supabase.table("existing_clients").delete().eq("id", client_id).execute()
     return {"status": "deleted"}
 
 
 @router.put("/{lead_id}/status")
-async def update_lead_status(lead_id: str, body: LeadStatusUpdate):
+async def update_lead_status(lead_id: str, body: LeadStatusUpdate, user: dict = Depends(get_current_user)):
     supabase.table("leads").update({"status": body.status}).eq("id", lead_id).execute()
     if body.status == "dismissed":
         lead = supabase.table("leads").select("profile_id, signal_id").eq("id", lead_id).execute()
