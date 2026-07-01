@@ -18,8 +18,27 @@ from app.models import ProfileCreate, ICPApproval, ICPChatMessage
 from app.database import supabase
 from app.agents import profile_agent
 from app.auth import get_current_user, owned_profile
+from app.config import MAX_PROFILES_PER_USER
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
+
+
+def _assert_profile_quota(user: dict):
+    """Non-admins can own at most MAX_PROFILES_PER_USER profiles."""
+    if user.get("is_admin"):
+        return
+    try:
+        r = supabase.table("user_profiles").select("id", count="exact") \
+            .eq("user_id", user["id"]).execute()
+        count = r.count or 0
+    except Exception:
+        return  # never block creation on a count error
+    if count >= MAX_PROFILES_PER_USER:
+        raise HTTPException(
+            403,
+            f"Trial limit reached — up to {MAX_PROFILES_PER_USER} profiles. "
+            f"Delete one or reach out to unlock more.",
+        )
 
 
 @router.post("/save-icp")
@@ -36,6 +55,7 @@ async def save_icp_to_db(body: dict, user: dict = Depends(get_current_user)):
         target_description = body.get("target_description", "")
         chosen_icp_text = body.get("chosen_icp_text", "")
         user_context = body.get("user_context", "")
+        _assert_profile_quota(user)
 
         # 1. Owned by the authenticated user
         user_id = user["id"]
@@ -128,6 +148,7 @@ async def create_profile(body: ProfileCreate, user: dict = Depends(get_current_u
     Create a new profile and kick off the Profile Agent.
     Returns the 3 ICP options for user to choose from.
     """
+    _assert_profile_quota(user)
     # 1. Create profile row — owned by the logged-in user
     result = supabase.table("user_profiles").insert({
         "user_id":             user["id"],
@@ -206,6 +227,7 @@ async def onboard(body: dict, user: dict = Depends(get_current_user)):
     intake = body.get("intake") or {}
     if not website_url:
         raise HTTPException(status_code=400, detail="website_url is required")
+    _assert_profile_quota(user)
 
     # 1. owned by the authenticated account; username is just the profile label
     user_id = user["id"]

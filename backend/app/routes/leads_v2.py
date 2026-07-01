@@ -18,18 +18,17 @@ from app.database import supabase
 from app.pipeline.assembly import assemble_list
 from app.models import LeadStatusUpdate
 from app.auth import owned_profile, get_current_user
-from app.config import MAX_SCANS_PER_DAY
+from app.config import MAX_RUNS_PER_PROFILE
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads/v2", tags=["leads_v2"])
 
 
-def _scans_today(user_id: str) -> int:
-    """How many runs this user has triggered since UTC midnight (durable, from scan_runs)."""
-    start = _dt.datetime.now(_dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+def _runs_for_profile(profile_id: str) -> int:
+    """How many times this profile has been scanned (durable, from scan_runs)."""
     try:
         r = supabase.table("scan_runs").select("id", count="exact") \
-            .eq("user_id", user_id).gte("created_at", start.isoformat()).execute()
+            .eq("profile_id", profile_id).execute()
         return r.count or 0
     except Exception as e:
         logger.warning(f"[ratelimit] count failed (allowing run): {e}")
@@ -652,9 +651,15 @@ async def trigger_run(profile_id: str, background_tasks: BackgroundTasks,
     if _job_store.get(profile_id, {}).get("status") == "running":
         return {"status": "already_running"}
     if not user.get("is_admin"):
-        used = _scans_today(user["id"])
-        if used >= MAX_SCANS_PER_DAY:
-            return {"status": "rate_limited", "used": used, "limit": MAX_SCANS_PER_DAY}
+        used = _runs_for_profile(profile_id)
+        if used >= MAX_RUNS_PER_PROFILE:
+            return {
+                "status": "rate_limited",
+                "used": used,
+                "limit": MAX_RUNS_PER_PROFILE,
+                "message": f"Trial limit reached — {MAX_RUNS_PER_PROFILE} scans per profile. "
+                           f"Create a new profile or reach out to unlock more.",
+            }
     _record_scan(user["id"], profile_id)
     _job_store[profile_id] = {"status": "running", "leads": []}
     background_tasks.add_task(_run_agent_and_score, profile_id)

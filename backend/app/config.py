@@ -57,5 +57,6 @@ ADMIN_EMAILS = {
     if e.strip()
 }
 
-# Per-user daily scan cap (non-admins). Durable via the scan_runs table.
-MAX_SCANS_PER_DAY = int(os.getenv("MAX_SCANS_PER_DAY", "2"))
+# Trial limits for non-admins (admins bypass). Durable via DB counts.
+MAX_PROFILES_PER_USER = int(os.getenv("MAX_PROFILES_PER_USER", "2"))
+MAX_RUNS_PER_PROFILE = int(os.getenv("MAX_RUNS_PER_PROFILE", "2"))
