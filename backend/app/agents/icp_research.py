@@ -16,6 +16,7 @@ Output is a compact evidence dict injected into the ICP generation prompt.
 import logging
 import httpx
 from app.config import EXA_API_KEY, SERPER_API_KEY
+from app import usage
 
 logger = logging.getLogger(__name__)
 SERPER_SEARCH_URL = "https://google.serper.dev/search"
@@ -35,7 +36,7 @@ async def find_lookalikes(website_url: str, service_desc: str) -> list[dict]:
         return []
     out = []
     try:
-        from exa_py import Exa
+        from app.exa_client import Exa
         exa = Exa(api_key=EXA_API_KEY)
         own = _domain_of(website_url)
         # describe-the-space query beats raw findSimilar (which returned own subpages)
@@ -75,6 +76,7 @@ async def find_reviews(company_name: str, service_desc: str = "") -> list[str]:
                     headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                     json={"q": f"site:{site} {company_name} {kw} reviews", "num": 4},
                 )
+                usage.log_serper()
                 if resp.status_code != 200:
                     continue
                 for r in resp.json().get("organic", []):

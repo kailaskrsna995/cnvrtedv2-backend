@@ -19,6 +19,7 @@ import httpx
 import logging
 from datetime import datetime, timezone, timedelta
 from app.llm import Anthropic
+from app import usage
 from app.config import SERPER_API_KEY, ANTHROPIC_API_KEY
 from app.queue import signal_queue
 from app.database import supabase
@@ -102,6 +103,7 @@ async def search_serper_news(query: str) -> list[dict]:
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                 json={"q": query, "num": 10, "gl": "us", "hl": "en", "tbs": "qdr:m2"},
             )
+            usage.log_serper()
             if resp.status_code == 200:
                 articles = resp.json().get("news", [])
                 return [a for a in articles if _is_recent(a)]

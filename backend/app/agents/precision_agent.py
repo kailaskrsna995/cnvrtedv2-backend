@@ -58,7 +58,7 @@ async def _exa_companies(dossier: dict) -> list[dict]:
         logger.warning("[Precision] dossier has no exa_queries")
         return []
 
-    from exa_py import Exa
+    from app.exa_client import Exa
     exa = Exa(api_key=EXA_API_KEY)
 
     async def _exa_search(q: str):

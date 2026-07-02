@@ -25,6 +25,7 @@ import asyncio
 import httpx
 from datetime import datetime, timezone, timedelta
 from app.llm import Anthropic
+from app import usage
 from app.config import (
     SERPER_API_KEY, ANTHROPIC_API_KEY,
     PRAW_CLIENT_ID, PRAW_CLIENT_SECRET, PRAW_USER_AGENT,
@@ -190,6 +191,7 @@ async def search_linkedin_posts(queries: list[str]) -> list[dict]:
                     headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                     json={"q": f"{query} linkedin", "num": 20, "tbs": "qdr:m"},
                 )
+                usage.log_serper()
                 if resp.status_code != 200:
                     return out
                 for r in resp.json().get("organic", []):
@@ -221,7 +223,7 @@ async def search_linkedin_posts(queries: list[str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _exa_client():
-    from exa_py import Exa
+    from app.exa_client import Exa
     return Exa(api_key=EXA_API_KEY)
 
 
@@ -362,6 +364,7 @@ async def search_reddit_via_serper(queries: list[str]) -> list[dict]:
                     headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                     json={"q": f"{query} reddit", "num": 20, "tbs": "qdr:m"},
                 )
+                usage.log_serper()
                 if resp.status_code != 200:
                     return out
                 for r in resp.json().get("organic", []):

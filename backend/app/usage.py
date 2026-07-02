@@ -27,6 +27,8 @@ _ANTHROPIC_PRICES = [
 _ANTHROPIC_DEFAULT = (3.0, 15.0)          # unknown model → assume Sonnet-tier
 _OPENAI_EMBED_PER_M = 0.02                 # text-embedding-3-small
 _APOLLO_PER_REVEAL = 0.05                  # estimate per revealed email (admin can correct via balance)
+_SERPER_PER_REQ = 0.001                    # estimate per Serper query (paid ~$0.30-1 / 1000)
+_EXA_PER_REQ = 0.005                        # estimate per Exa search (neural ~$5 / 1000)
 
 
 def _anthropic_rate(model: str):
@@ -79,6 +81,20 @@ def log_openai_embedding(model: str, total_tokens: int):
 def log_apollo_reveal(n: int = 1):
     try:
         _add("apollo", "email_reveal", n * _APOLLO_PER_REVEAL, n, 0)
+    except Exception:
+        pass
+
+
+def log_serper(n: int = 1):
+    try:
+        _add("serper", "search", n * _SERPER_PER_REQ, n, 0)
+    except Exception:
+        pass
+
+
+def log_exa(n: int = 1):
+    try:
+        _add("exa", "search", n * _EXA_PER_REQ, n, 0)
     except Exception:
         pass
 

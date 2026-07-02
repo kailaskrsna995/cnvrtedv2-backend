@@ -20,6 +20,7 @@ import logging
 import httpx
 from urllib.parse import urlparse
 from app.llm import Anthropic
+from app import usage
 from app.database import supabase
 from app.config import ANTHROPIC_API_KEY, SERPER_API_KEY
 from app.models import ICPOption
@@ -393,6 +394,7 @@ async def research_clients(client_names: list[str]) -> str:
                     headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
                     json={"q": f"{name} company what they do", "num": 3},
                 )
+                usage.log_serper()
                 if r.status_code != 200:
                     return f"- {name}: (lookup failed)"
                 data = r.json()

@@ -23,6 +23,7 @@ import logging
 import asyncio
 from datetime import datetime, timezone
 from app.llm import Anthropic
+from app import usage
 from app.config import SERPER_API_KEY, ANTHROPIC_API_KEY
 from app.queue import signal_queue
 from app.database import supabase
@@ -97,7 +98,7 @@ async def build_watchlist_exa(profile_id: str, icp_text: str, sp: dict, existing
     from app.config import EXA_API_KEY
     if not EXA_API_KEY:
         return []
-    from exa_py import Exa
+    from app.exa_client import Exa
     from urllib.parse import urlparse
     exa = Exa(api_key=EXA_API_KEY)
 
@@ -153,7 +154,7 @@ async def build_precision_targets(profile_id: str, dossier: dict, max_per_query:
     from app.config import EXA_API_KEY
     if not EXA_API_KEY:
         return []
-    from exa_py import Exa
+    from app.exa_client import Exa
     from urllib.parse import urlparse
     exa = Exa(api_key=EXA_API_KEY)
 
@@ -332,6 +333,7 @@ async def check_company(http: httpx.AsyncClient, company: dict) -> list[dict]:
             headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
             json={"q": query, "num": 5, "tbs": "qdr:m"},  # last month
         )
+        usage.log_serper()
         if resp.status_code != 200:
             return []
         hits = []
@@ -363,6 +365,7 @@ async def validate_company(http: httpx.AsyncClient, company: dict, need_terms: s
             headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
             json={"q": f'"{name}"', "num": 5, "tbs": "qdr:y"},  # past year, any news
         )
+        usage.log_serper()
         proof_url = proof_summary = None
         if resp.status_code == 200:
             for a in resp.json().get("news", []):
