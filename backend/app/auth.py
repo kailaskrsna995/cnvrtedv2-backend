@@ -125,3 +125,10 @@ async def owned_profile(profile_id: str, user: dict = Depends(get_current_user))
     Returns the caller (so handlers can read user['id']/['is_admin'] if needed)."""
     assert_owner(profile_id, user)
     return user
+
+
+async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    """Dependency for /admin routes — only the founder allowlist gets through."""
+    if not user.get("is_admin"):
+        raise HTTPException(403, "Admins only.")
+    return user

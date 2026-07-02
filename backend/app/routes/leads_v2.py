@@ -19,6 +19,7 @@ from app.pipeline.assembly import assemble_list
 from app.models import LeadStatusUpdate
 from app.auth import owned_profile, get_current_user
 from app.config import MAX_RUNS_PER_PROFILE
+from app import usage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads/v2", tags=["leads_v2"])
@@ -641,6 +642,12 @@ async def _run_agent_and_score(profile_id: str):
     except Exception as e:
         logger.error(f"[leads] Background job failed: {e}")
         _job_store[profile_id] = {"status": "error", "error": str(e), "leads": [], "pipeline": trace}
+    finally:
+        # persist this run's accumulated API costs (Claude/OpenAI/Apollo)
+        try:
+            usage.flush()
+        except Exception:
+            pass
 
 
 @router.post("/run/{profile_id}")

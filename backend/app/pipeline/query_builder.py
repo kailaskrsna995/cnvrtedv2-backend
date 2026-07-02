@@ -153,7 +153,7 @@ async def dossier_queries(dossier: dict, kind: str, max_queries: int = 8) -> lis
     if not dossier or kind not in _KIND_CONFIG:
         return []
     try:
-        from anthropic import Anthropic
+        from app.llm import Anthropic
         from app.config import ANTHROPIC_API_KEY
         cfg = _KIND_CONFIG[kind]
         segs = sorted(dossier.get("core_segments", []), key=lambda s: s.get("fit", 0), reverse=True)

@@ -16,6 +16,7 @@ import logging
 from openai import AsyncOpenAI
 from app.database import supabase
 from app.config import VECTOR_SIMILARITY_THRESHOLD, OPENAI_API_KEY
+from app import usage
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,10 @@ async def vectorise_text(text: str) -> list[float]:
             model=EMBEDDING_MODEL,
             input=text.strip(),
         )
+        try:
+            usage.log_openai_embedding(EMBEDDING_MODEL, getattr(response.usage, "total_tokens", 0))
+        except Exception:
+            pass
         return response.data[0].embedding
     except Exception as e:
         logger.error(f"[Matching] OpenAI embedding failed: {e}")

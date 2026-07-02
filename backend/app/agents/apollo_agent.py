@@ -14,6 +14,7 @@ import logging
 import re
 import httpx
 from app.config import APOLLO_API_KEY
+from app import usage
 
 logger = logging.getLogger(__name__)
 BASE = "https://api.apollo.io/api/v1"
@@ -88,6 +89,8 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
                     "reveal_personal_emails": False,   # work email only
                 })
                 if match.status_code == 200:
+                    try: usage.log_apollo_reveal()
+                    except Exception: pass
                     person = match.json().get("person", {}) or {}
                     email = email or _clean_email(person.get("email"))
                     phone = phone or _extract_phone(person)
@@ -139,6 +142,8 @@ async def find_person_by_linkedin(linkedin_url: str) -> dict | None:
             if match.status_code != 200:
                 logger.warning(f"[apollo] linkedin match {match.status_code}: {match.text[:160]}")
                 return None
+            try: usage.log_apollo_reveal()
+            except Exception: pass
             person = match.json().get("person") or {}
             if not person:
                 return None

@@ -19,7 +19,7 @@ import re
 import logging
 import httpx
 from urllib.parse import urlparse
-from anthropic import Anthropic
+from app.llm import Anthropic
 from app.database import supabase
 from app.config import ANTHROPIC_API_KEY, SERPER_API_KEY
 from app.models import ICPOption

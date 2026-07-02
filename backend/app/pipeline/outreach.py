@@ -18,7 +18,7 @@ Example output:
 """
 
 import logging
-from anthropic import Anthropic
+from app.llm import Anthropic
 from app.config import ANTHROPIC_API_KEY
 
 logger = logging.getLogger(__name__)

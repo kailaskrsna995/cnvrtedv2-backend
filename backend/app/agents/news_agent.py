@@ -18,7 +18,7 @@ import hashlib
 import httpx
 import logging
 from datetime import datetime, timezone, timedelta
-from anthropic import Anthropic
+from app.llm import Anthropic
 from app.config import SERPER_API_KEY, ANTHROPIC_API_KEY
 from app.queue import signal_queue
 from app.database import supabase

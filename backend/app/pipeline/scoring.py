@@ -12,7 +12,7 @@ Anthropic caches tokens >1024 — cuts input cost ~90% on repeated calls.
 
 import json
 import logging
-from anthropic import AsyncAnthropic
+from app.llm import AsyncAnthropic
 from app.config import ANTHROPIC_API_KEY, INTENT_SCORE_THRESHOLD
 
 logger = logging.getLogger(__name__)
