@@ -90,6 +90,73 @@ async def summary(_admin: dict = Depends(require_admin)):
     }
 
 
+@router.get("/users")
+async def users_overview(_admin: dict = Depends(require_admin)):
+    """Per-user activity for the admin dashboard — email, username, # profiles,
+    # scans (searches), first/last scan. Read-only join over users + scan_runs +
+    user_profiles. Sorted most-active first."""
+    from app.config import ADMIN_EMAILS
+
+    try:
+        users = supabase.table("users").select("*").execute().data or []
+    except Exception as e:
+        logger.warning(f"[admin] users fetch failed: {e}")
+        users = []
+    try:
+        scans = (supabase.table("scan_runs")
+                 .select("user_id, profile_id, created_at")
+                 .order("created_at", desc=True)
+                 .limit(_USAGE_FETCH_LIMIT).execute().data) or []
+    except Exception as e:
+        logger.warning(f"[admin] scan_runs fetch failed: {e}")
+        scans = []
+    try:
+        profiles = supabase.table("user_profiles").select("id, name, user_id").execute().data or []
+    except Exception:
+        profiles = []
+
+    profile_name = {p["id"]: (p.get("name") or "—") for p in profiles}
+    profiles_by_user: dict = {}
+    for p in profiles:
+        profiles_by_user.setdefault(p.get("user_id"), []).append(p.get("name") or "—")
+
+    # scan_runs come newest-first → index 0 is the most recent scan for each user
+    scans_by_user: dict = {}
+    for s in scans:
+        scans_by_user.setdefault(s.get("user_id"), []).append(s)
+
+    out = []
+    for u in users:
+        uid = u.get("id")
+        email = u.get("email") or ""
+        u_scans = scans_by_user.get(uid, [])
+        recent = [{"profile": profile_name.get(s.get("profile_id"), "—"),
+                   "at": s.get("created_at")} for s in u_scans[:10]]
+        out.append({
+            "id": uid,
+            "email": email,
+            "username": u.get("username") or "—",
+            "is_admin": email.lower() in ADMIN_EMAILS,
+            "joined": u.get("created_at"),
+            "profiles": len(profiles_by_user.get(uid, [])),
+            "profile_names": profiles_by_user.get(uid, []),
+            "scans": len(u_scans),
+            "last_scan": u_scans[0]["created_at"] if u_scans else None,
+            "first_scan": u_scans[-1]["created_at"] if u_scans else None,
+            "recent_scans": recent,
+        })
+
+    out.sort(key=lambda x: x["scans"], reverse=True)   # most active first
+    return {
+        "users": out,
+        "totals": {
+            "users": len(users),
+            "scans": len(scans),
+            "active_users": sum(1 for u in out if u["scans"] > 0),
+        },
+    }
+
+
 @router.get("/balances")
 async def get_balances(_admin: dict = Depends(require_admin)):
     usage.flush()
