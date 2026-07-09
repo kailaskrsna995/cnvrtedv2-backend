@@ -136,6 +136,22 @@ async def score_signal(
 
     modality = _MODALITY_RULE.get(delivery_model, "")
 
+    # Hiring signals get their own scoring lens: a job post is a company publicly investing in
+    # the seller's function NOW. On-modality only when the hire is a role that COMMISSIONS work.
+    hiring_rule = ""
+    if signal_type == "hiring":
+        hiring_rule = """
+
+THIS IS A HIRING SIGNAL (a company posting a job). Score it as stated-investment intent:
+- STRONG (0.75+): the role OWNS or COMMISSIONS the exact function this seller powers (e.g. a
+  Head of Content / VP Marketing / Brand lead for a video/content seller) AND the company plausibly
+  sits in the seller's vertical. Building the function → they will need outside production help now.
+- WEAK / MISMATCH (≤0.4): the role is a JUNIOR / execution hire meant to do the work IN-HOUSE
+  (e.g. "Junior Video Editor", "in-house motion designer") — that REPLACES outsourcing, it's a
+  negative signal for a service seller. Also weak: off-vertical company, a staffing/recruiting
+  agency, or a COMPETITOR/vendor hiring to build a rival product.
+Judge the ROLE's fit to the offering, not just the company. Quote the role/company as proof."""
+
     # Cached block — ICP + user_context + delivery model + dossier never change within a run
     # Anthropic caches this after first call, ~90% input token saving on repeats
     cached_context = f"""Seller profile (what they offer):
@@ -162,7 +178,7 @@ future need — score it ≤0.55 UNLESS one of these holds:
       or expanding WILL need more of what this seller provides → that's a STRONG trigger (0.7+), not weak.
 A generic raise by a company OUTSIDE the seller's core vertical stays weak (≤0.5) — money alone doesn't
 mean they need THIS service.
-For company_name, extract the company OR the person's name/handle if it's an individual posting."""
+For company_name, extract the company OR the person's name/handle if it's an individual posting.{hiring_rule}"""
 
     messages = [
         {

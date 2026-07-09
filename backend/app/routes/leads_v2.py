@@ -241,6 +241,20 @@ async def _run_agent_and_score(profile_id: str):
             logger.error(f"[leads] Buyer intent agent failed (continuing): {e}")
             _stage("Buyer intent agent", "failed", error=str(e))
 
+        # Hiring agent — the Intent-tab engine. Companies actively hiring commissioning
+        # roles (Head of Content/Video Producer/etc.) = publicly investing in the seller's
+        # function NOW = on-modality stated-investment intent. Dossier-driven roles, Serper
+        # job search. Signals tagged evidence_type=stated_intent downstream → Intent tab.
+        logger.info(f"[leads] Running hiring agent for {profile_id}")
+        try:
+            from app.agents.hiring_agent import run as run_hiring
+            hiring_stats = await run_hiring(profile_id)
+            executed_queries["hiring"] = hiring_stats.pop("_queries", [])
+            _stage("Hiring agent", "ok", hiring_stats)
+        except Exception as e:
+            logger.error(f"[leads] Hiring agent failed (continuing): {e}")
+            _stage("Hiring agent", "failed", error=str(e))
+
         logger.info(f"[leads] Running news agent for {profile_id}")
         try:
             from app.agents.news_agent import run as run_news
@@ -407,13 +421,13 @@ async def _run_agent_and_score(profile_id: str):
                     return None
                 stype = signal.get("signal_type", "funding")
 
-                # Vector gate — skipped for watchlist (in-ICP) AND buyer_intent
-                # (already relevance-filtered; short posts embed low vs ICP) AND
-                # precision_exa signals (already Exa-semantic + dossier-fit ranked;
-                # their short "company + headline" text embeds low vs the long ICP).
+                # Vector gate — skipped for watchlist (in-ICP) AND buyer_intent AND hiring
+                # (already relevance-filtered / short structured text embeds low vs the long
+                # ICP; the role→offering relevance is judged by the scorer, not vectors) AND
+                # precision_exa signals (already Exa-semantic + dossier-fit ranked).
                 is_precision = signal.get("source_platform") == "precision_exa"
                 match_score = None
-                if stype not in ("watchlist", "buyer_intent") and not is_precision:
+                if stype not in ("watchlist", "buyer_intent", "hiring") and not is_precision:
                     signal_vector = await vectorise_text(raw_text)
                     if not signal_vector:
                         return None
@@ -456,7 +470,10 @@ async def _run_agent_and_score(profile_id: str):
                     "match_score": round(match_score, 2) if match_score is not None else None,
                     "why": score_result.get("why", ""),
                     "proof": score_result.get("proof", ""),
-                    "evidence_type": score_result.get("evidence_type", "trigger"),
+                    # Hiring = a public, current declaration of investment in the seller's
+                    # function → stated-investment intent → Intent tab (not a passive trigger).
+                    "evidence_type": "stated_intent" if stype == "hiring"
+                                     else score_result.get("evidence_type", "trigger"),
                     "passed": score_result.get("passed", False),
                     "source_query": signal.get("source_query", ""),
                 }

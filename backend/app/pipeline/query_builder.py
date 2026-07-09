@@ -194,7 +194,7 @@ def buyer_queries(sp: dict, max_queries: int = 6) -> list[str]:
 # Query performance memory — search improves every run
 # ---------------------------------------------------------------------------
 
-AGENT_TYPE_MAP = {"funding": "funding", "news": "news", "buyer_intent": "buyer_intent"}
+AGENT_TYPE_MAP = {"funding": "funding", "news": "news", "buyer_intent": "buyer_intent", "hiring": "hiring"}
 
 
 def filter_by_performance(queries: list[str], profile_id: str, agent: str,
