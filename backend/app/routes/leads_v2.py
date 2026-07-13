@@ -18,7 +18,7 @@ from app.database import supabase
 from app.pipeline.assembly import assemble_list
 from app.models import LeadStatusUpdate
 from app.auth import owned_profile, get_current_user
-from app.config import MAX_RUNS_PER_PROFILE
+from app.config import MAX_RUNS_PER_PROFILE, MAX_CONCURRENT_SCANS
 from app import usage
 
 logger = logging.getLogger(__name__)
@@ -184,6 +184,18 @@ def remove_companies_from_cache(profile_id: str, exclude_terms: list) -> int:
     _job_store[profile_id] = data
     _persist_results(profile_id, data)
     return before - len(data.get("leads", []))
+
+
+# Concurrency limiter — the hard no-crash guarantee under load. Only MAX_CONCURRENT_SCANS
+# scans execute at once; any extra background tasks wait here (profile status stays
+# "running" so the UI keeps showing progress) until a slot frees. Demo-safe: with the
+# default of 2 it never trips in a 1-user demo.
+_scan_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
+
+
+async def _run_with_limit(profile_id: str):
+    async with _scan_semaphore:
+        await _run_agent_and_score(profile_id)
 
 
 async def _run_agent_and_score(profile_id: str):
@@ -413,6 +425,25 @@ async def _run_agent_and_score(profile_id: str):
         _sem = asyncio.Semaphore(5)
         _competitors_found: list = []
 
+        # Live streaming — as each lead passes scoring, push it into the job store so the
+        # UI shows leads appear mid-scan instead of dumping all at the end. Only threshold-
+        # passing leads stream (no junk); the final judge replaces this list at the end, so a
+        # few may settle away. Keyed by company (best score wins) to avoid dupes in the preview.
+        _live_leads: dict = {}
+
+        def _push_live(lead: dict):
+            if not lead or not lead.get("passed"):
+                return
+            key = (lead.get("company_name") or lead.get("source_url") or "").strip().lower()
+            if not key:
+                return
+            cur = _live_leads.get(key)
+            if not cur or lead["intent_score"] > cur["intent_score"]:
+                _live_leads[key] = lead
+            preview = sorted(_live_leads.values(), key=lambda x: x["intent_score"], reverse=True)
+            _job_store[profile_id] = {"status": "running", "leads": preview,
+                                      "error": None, "pipeline": trace}
+
         async def process_signal(signal: dict):
             async with _sem:
               try:
@@ -457,7 +488,7 @@ async def _run_agent_and_score(profile_id: str):
                         _competitors_found.append(company_name)
                     return None
 
-                return {
+                lead = {
                     "company_name": company_name,
                     "company_domain": signal.get("company_domain"),
                     "funding_round": signal.get("funding_round"),
@@ -477,6 +508,8 @@ async def _run_agent_and_score(profile_id: str):
                     "passed": score_result.get("passed", False),
                     "source_query": signal.get("source_query", ""),
                 }
+                _push_live(lead)   # stream it into the UI the moment it passes
+                return lead
               except Exception as e:
                 logger.warning(f"[leads] signal skipped (error): {e}")
                 return None
@@ -686,7 +719,7 @@ async def trigger_run(profile_id: str, background_tasks: BackgroundTasks,
             }
     _record_scan(user["id"], profile_id)
     _job_store[profile_id] = {"status": "running", "leads": []}
-    background_tasks.add_task(_run_agent_and_score, profile_id)
+    background_tasks.add_task(_run_with_limit, profile_id)   # gated by the concurrency limiter
     return {"status": "started"}
 
 

@@ -13,12 +13,12 @@ Anthropic caches tokens >1024 — cuts input cost ~90% on repeated calls.
 import json
 import logging
 from app.llm import AsyncAnthropic
-from app.config import ANTHROPIC_API_KEY, INTENT_SCORE_THRESHOLD
+from app.config import ANTHROPIC_API_KEY, INTENT_SCORE_THRESHOLD, ANTHROPIC_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 # Async client — true concurrency + doesn't block the event loop (sync client
 # made gather() fake-parallel and froze the server during scoring).
-client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY, max_retries=ANTHROPIC_MAX_RETRIES)
 
 HAIKU_MODEL  = "claude-haiku-4-5-20251001"
 SONNET_MODEL = "claude-sonnet-4-6"

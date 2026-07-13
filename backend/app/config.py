@@ -60,3 +60,8 @@ ADMIN_EMAILS = {
 # Trial limits for non-admins (admins bypass). Durable via DB counts.
 MAX_PROFILES_PER_USER = int(os.getenv("MAX_PROFILES_PER_USER", "2"))
 MAX_RUNS_PER_PROFILE = int(os.getenv("MAX_RUNS_PER_PROFILE", "2"))
+
+# Reliability: cap how many scans run at once (rest queue) so a herd can't crash the box;
+# and let the Anthropic SDK auto-retry rate-limit (429) blips mid-scan.
+MAX_CONCURRENT_SCANS = int(os.getenv("MAX_CONCURRENT_SCANS", "2"))
+ANTHROPIC_MAX_RETRIES = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
