@@ -737,6 +737,120 @@ async def get_results(profile_id: str, user: dict = Depends(owned_profile)):
     return {"status": "idle"}
 
 
+# ---------------------------------------------------------------------------
+# Co-pilot assistant — reads the CURRENT leads + the seller's message, picks ONE
+# action, returns it. reorder/explain/answer handled here (safe, read-only); a
+# targeting change ("these aren't my buyers") delegates to the dossier refine.
+# The frontend applies reshape actions to LOCAL state → animated, no reload.
+# ---------------------------------------------------------------------------
+_ASSISTANT_TOOL = {
+    "name": "assistant_action",
+    "description": "Decide how to respond to the seller's message about their lead list.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reply": {"type": "string", "description": "1-2 warm, specific sentences to say"},
+            "action": {"type": "string",
+                       "enum": ["reorder", "filter", "reset_view", "explain",
+                                "remove", "get_contact", "refine", "answer"]},
+            "sort_by": {"type": "string", "enum": ["score", "relevance", "company"],
+                        "description": "for reorder only"},
+            "target": {"type": "string",
+                       "description": "for explain/remove/get_contact: the company they mean"},
+            "filter_text": {"type": "string",
+                            "description": "for filter: keep only leads whose company/reason contains this word (e.g. 'OTT', 'India')"},
+            "filter_has_contact": {"type": "boolean",
+                                   "description": "for filter: keep only leads that already have a contact"},
+            "filter_min_score": {"type": "number",
+                                 "description": "for filter: keep only leads scoring at least this (0-1, e.g. 0.7)"},
+        },
+        "required": ["reply", "action"],
+    },
+}
+
+_ASSISTANT_PROMPT = """You are the seller's co-pilot over their CURRENT lead list. Read their
+message and pick ONE action.
+
+CURRENT LEADS (company [type] score — why):
+{leads}
+
+RECENT CONVERSATION (resolve references like "it" / "that one" / "the last one" / "them" against this):
+{history}
+
+SELLER MESSAGE: {message}
+
+Actions:
+- reorder: they want the list ordered differently. sort_by = "score" (buying intent, default),
+  "relevance" (ICP match), or "company" (A-Z).
+- filter: they want to narrow the list. Set filter_text (a word to match, e.g. "OTT"/"India"),
+  filter_has_contact (true), and/or filter_min_score (0-1). Filters STACK on the current view.
+- reset_view: they want to clear all filters/sorting and see the full list again.
+- explain: they ask why a specific company is here / about one lead. Set target to that company and,
+  in reply, explain using THAT lead's own "why" above — be specific, cite the reason.
+- remove: they want to drop a specific company from the list. Set target to that company; in reply
+  confirm you've removed it.
+- get_contact: they want the decision-maker / contact for a specific company. Set target to that
+  company; in reply say you're pulling the contact.
+- refine: they want to change WHO is targeted ("these aren't my buyers", "focus on X", "exclude Y", "only India").
+- answer: greeting / general question / anything else → just reply.
+
+Always write reply. Keep it warm and short."""
+
+
+@router.post("/{profile_id}/assistant")
+async def assistant(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    """Co-pilot over the leads → {reply, action, sort_by?, target?, rebuilding?}."""
+    message = (body.get("message") or "").strip()
+    if not message:
+        return {"reply": "Ask me anything about your leads — “why is X here?”, “reorder by relevance”, "
+                         "or tell me what’s off.", "action": "answer"}
+
+    data = _load_results_any(profile_id) or {}
+    leads = data.get("leads", []) or []
+    ctx = "\n".join(
+        f"- {l.get('company_name') or 'lead'} [{l.get('evidence_type', 'trigger')}] "
+        f"{round((l.get('intent_score') or 0) * 100)}: {(l.get('why') or '')[:150]}"
+        for l in leads[:40]
+    ) or "(no leads yet — a scan hasn't produced results)"
+
+    # recent chat turns (from the frontend) so references like "it"/"that one" resolve
+    history = body.get("history") or []
+    hist_txt = "\n".join(
+        f"{h.get('role', 'user')}: {(h.get('text') or '')[:200]}" for h in history[-6:]
+    ) or "(no earlier messages)"
+
+    try:
+        from app.llm import AsyncAnthropic
+        from app.config import ANTHROPIC_API_KEY
+        client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        resp = await client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=400,
+            tools=[_ASSISTANT_TOOL], tool_choice={"type": "tool", "name": "assistant_action"},
+            messages=[{"role": "user",
+                       "content": _ASSISTANT_PROMPT.format(leads=ctx, message=message, history=hist_txt)}],
+        )
+        out = next((b.input for b in resp.content if getattr(b, "type", "") == "tool_use"), None) or {}
+    except Exception as e:
+        logger.warning(f"[assistant] failed: {e}")
+        return {"reply": "Sorry, I hit an error — try rephrasing.", "action": "answer"}
+
+    if out.get("action") == "refine":
+        try:
+            from app.agents import profile_agent
+            r = await profile_agent.refine_dossier(profile_id, message)
+            return {"reply": r.get("reply", "Updated your targeting."),
+                    "action": "refine", "rebuilding": r.get("rebuilding", False)}
+        except Exception as e:
+            logger.warning(f"[assistant] refine delegate failed: {e}")
+            return {"reply": "I couldn't apply that change — try rephrasing.", "action": "answer"}
+
+    return {"reply": out.get("reply", "Done."), "action": out.get("action", "answer"),
+            "sort_by": out.get("sort_by"), "target": out.get("target"),
+            "filter_text": out.get("filter_text"),
+            "filter_has_contact": out.get("filter_has_contact"),
+            "filter_min_score": out.get("filter_min_score")}
+
+
 @router.get("/{profile_id}")
 async def get_leads(profile_id: str, user: dict = Depends(owned_profile)):
     leads = await assemble_list(profile_id)
@@ -1021,6 +1135,61 @@ async def remove_lead(profile_id: str, body: dict, user: dict = Depends(owned_pr
     _job_store[profile_id] = data
     _persist_results(profile_id, data)
     return {"removed": before - len(data.get("leads", []))}
+
+
+async def _enrich_single_lead(profile_id: str, company: str) -> dict:
+    """Enrich ONE lead's contact by company name (chatbot 'get contact for X'). Company lead
+    → Apollo by domain; intent lead → Apollo by the LinkedIn poster. Patches + persists.
+    Runs inline (single lookup, a few seconds) so the UI can spinner-then-fill that one row."""
+    from app.agents.apollo_agent import find_contact, find_person_by_linkedin, linkedin_profile_from_post
+    data = _load_results_any(profile_id)
+    leads = (data or {}).get("leads") or []
+    key = (company or "").strip().lower()
+    lead = next((l for l in leads if (l.get("company_name") or "").strip().lower() == key), None)
+    if not lead and key:  # loose fallback
+        lead = next((l for l in leads if key in (l.get("company_name") or "").strip().lower()), None)
+    if not lead:
+        return {"found": False}
+
+    prof = supabase.table("user_profiles").select("search_profile").eq("id", profile_id).execute()
+    dossier = ((prof.data[0].get("search_profile") if prof.data else None) or {}).get("dossier") or {}
+    titles = dossier.get("buyer_titles") or [
+        "Head of Marketing", "VP Marketing", "CMO", "Founder", "Head of Content", "Head of Growth"]
+
+    c = None
+    try:
+        if lead.get("evidence_type") == "stated_intent":
+            url = lead.get("source_url") or ""
+            profu = linkedin_profile_from_post(url) if url else None
+            if profu:
+                c = await find_person_by_linkedin(profu)
+        elif lead.get("company_domain"):
+            c = await find_contact(lead.get("company_name"), lead.get("company_domain"), titles)
+    except Exception as e:
+        logger.warning(f"[enrich-one] apollo failed for {company}: {e}")
+
+    if c and (c.get("name") or c.get("email")):
+        lead["contact_name"] = c.get("name")
+        lead["contact_title"] = c.get("title")
+        lead["contact_email"] = c.get("email")
+        lead["contact_phone"] = c.get("phone")
+        lead["contact_linkedin"] = c.get("linkedin")
+        if data:
+            _job_store[profile_id] = data
+            _persist_results(profile_id, data)
+        return {"found": True, "company": lead.get("company_name"),
+                "contact_name": c.get("name"), "contact_title": c.get("title"),
+                "contact_email": c.get("email"), "contact_phone": c.get("phone"),
+                "contact_linkedin": c.get("linkedin")}
+    return {"found": False, "company": lead.get("company_name")}
+
+
+@router.post("/{profile_id}/enrich-one")
+async def enrich_one(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    company = (body.get("company") or "").strip()
+    if not company:
+        return {"found": False}
+    return await _enrich_single_lead(profile_id, company)
 
 
 @router.post("/{profile_id}/export-notion")
