@@ -54,59 +54,92 @@ def _extract_phone(p: dict) -> str | None:
             or org.get("phone") or org.get("primary_phone", {}).get("number") or None)
 
 
+async def _resolve_domain(http, headers, company_name: str) -> str | None:
+    """No domain? Look one up from the company name via Apollo org search (no new provider).
+    Name-only leads (precision/watchlist) used to be skipped entirely — this recovers them."""
+    if not company_name:
+        return None
+    try:
+        r = await http.post(f"{BASE}/mixed_companies/api_search", headers=headers, json={
+            "q_organization_name": company_name, "page": 1, "per_page": 1,
+        })
+        if r.status_code == 200:
+            orgs = r.json().get("organizations") or r.json().get("accounts") or []
+            if orgs:
+                d = orgs[0].get("primary_domain") or orgs[0].get("website_url") or ""
+                d = re.sub(r"^https?://(www\.)?", "", d).split("/")[0].strip()
+                return d or None
+    except Exception as e:
+        logger.debug(f"[apollo] domain resolve failed for {company_name}: {e}")
+    return None
+
+
 async def find_contact(company_name: str, domain: str, titles: list[str]) -> dict | None:
-    """Return the best POC for a company, or None. Reveals one work email (1 credit)."""
-    if not APOLLO_API_KEY or not domain:
+    """Best POC for a company, or None. Maximizes Apollo coverage: resolves a domain if
+    missing, broadens titles if the filtered search is empty, and walks candidates
+    (senior first) revealing until one yields a work email (reveals capped at 3 = cost bound)."""
+    if not APOLLO_API_KEY:
         return None
     headers = {"X-Api-Key": APOLLO_API_KEY, "Content-Type": "application/json", "Cache-Control": "no-cache"}
     try:
         async with httpx.AsyncClient(timeout=30) as http:
-            # 1. People search by domain + buyer titles
-            search = await http.post(f"{BASE}/mixed_people/api_search", headers=headers, json={
-                "person_titles": (titles or [])[:12],
-                "q_organization_domains_list": [domain],
-                "page": 1,
-                "per_page": 10,
-            })
-            if search.status_code != 200:
-                logger.warning(f"[apollo] search {search.status_code}: {search.text[:200]}")
+            # 0. Resolve a domain if we don't have one (was the #1 cause of misses).
+            if not domain and company_name:
+                domain = await _resolve_domain(http, headers, company_name)
+            if not domain:
                 return None
-            people = search.json().get("people") or search.json().get("contacts") or []
+
+            # 1. People search by domain + titles; if empty, retry WITHOUT titles
+            #    (any decision-maker at the domain) so a title mismatch doesn't zero us out.
+            async def _search(with_titles: bool) -> list:
+                body = {"q_organization_domains_list": [domain], "page": 1, "per_page": 10}
+                if with_titles and titles:
+                    body["person_titles"] = titles[:12]
+                r = await http.post(f"{BASE}/mixed_people/api_search", headers=headers, json=body)
+                if r.status_code != 200:
+                    logger.warning(f"[apollo] search {r.status_code}: {r.text[:160]}")
+                    return []
+                return r.json().get("people") or r.json().get("contacts") or []
+
+            people = await _search(with_titles=True) or await _search(with_titles=False)
             if not people:
                 logger.info(f"[apollo] no people for {domain}")
                 return None
             people.sort(key=lambda p: _rank(p.get("title")), reverse=True)
-            top = people[0]
 
-            email = _clean_email(top.get("email"))
-            phone = _extract_phone(top)
-            # 2. reveal work email if locked (1 email credit). We do NOT pass
-            #    reveal_phone_number — Apollo 400s it without a webhook_url (mobiles
-            #    are delivered async). Phone stays best-effort from the response.
-            if not email and top.get("id"):
-                match = await http.post(f"{BASE}/people/match", headers=headers, json={
-                    "id": top["id"],
-                    "reveal_personal_emails": False,   # work email only
-                })
-                if match.status_code == 200:
-                    try: usage.log_apollo_reveal()
-                    except Exception: pass
-                    person = match.json().get("person", {}) or {}
-                    email = email or _clean_email(person.get("email"))
-                    phone = phone or _extract_phone(person)
-                    if not top.get("linkedin_url"):
-                        top["linkedin_url"] = person.get("linkedin_url")
-                else:
-                    logger.warning(f"[apollo] match {match.status_code}: {match.text[:160]}")
-
-            name = top.get("name") or f"{top.get('first_name','')} {top.get('last_name','')}".strip()
-            return {
-                "name": name or None,
-                "title": top.get("title"),
-                "email": email,
-                "phone": phone,
-                "linkedin": top.get("linkedin_url"),
-            }
+            # 2. Walk candidates most-senior first; reveal until one has a work email.
+            #    reveals capped at 3 → bounds credit cost per company.
+            best = None
+            reveals = 0
+            for p in people[:6]:
+                email = _clean_email(p.get("email"))
+                phone = _extract_phone(p)
+                if not email and p.get("id") and reveals < 3:
+                    reveals += 1
+                    match = await http.post(f"{BASE}/people/match", headers=headers, json={
+                        "id": p["id"], "reveal_personal_emails": False,   # work email only
+                    })
+                    if match.status_code == 200:
+                        try: usage.log_apollo_reveal()
+                        except Exception: pass
+                        person = match.json().get("person", {}) or {}
+                        email = _clean_email(person.get("email"))
+                        phone = phone or _extract_phone(person)
+                        if not p.get("linkedin_url"):
+                            p["linkedin_url"] = person.get("linkedin_url")
+                    else:
+                        logger.warning(f"[apollo] match {match.status_code}: {match.text[:160]}")
+                cand = {
+                    "name": p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip() or None,
+                    "title": p.get("title"),
+                    "email": email,
+                    "phone": phone,
+                    "linkedin": p.get("linkedin_url"),
+                }
+                if email:
+                    return cand              # reachable contact found → done
+                best = best or cand          # keep the most-senior as a fallback (name/title/linkedin)
+            return best                      # no email anywhere → still return the top person
     except Exception as e:
         logger.error(f"[apollo] find_contact failed for {domain}: {e}")
         return None
