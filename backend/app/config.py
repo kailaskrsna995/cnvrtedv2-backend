@@ -65,3 +65,7 @@ MAX_RUNS_PER_PROFILE = int(os.getenv("MAX_RUNS_PER_PROFILE", "2"))
 # and let the Anthropic SDK auto-retry rate-limit (429) blips mid-scan.
 MAX_CONCURRENT_SCANS = int(os.getenv("MAX_CONCURRENT_SCANS", "2"))
 ANTHROPIC_MAX_RETRIES = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
+
+# Mailing safety net — non-admins get N free AI-written emails (regenerate once each);
+# past that we nudge "buy credits to auto-mail". Admins bypass.
+MAX_EMAILS_PER_USER = int(os.getenv("MAX_EMAILS_PER_USER", "5"))

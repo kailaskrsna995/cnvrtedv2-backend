@@ -18,7 +18,7 @@ from app.database import supabase
 from app.pipeline.assembly import assemble_list
 from app.models import LeadStatusUpdate
 from app.auth import owned_profile, get_current_user
-from app.config import MAX_RUNS_PER_PROFILE, MAX_CONCURRENT_SCANS
+from app.config import MAX_RUNS_PER_PROFILE, MAX_CONCURRENT_SCANS, MAX_EMAILS_PER_USER
 from app import usage
 
 logger = logging.getLogger(__name__)
@@ -880,6 +880,171 @@ async def assistant(profile_id: str, body: dict, user: dict = Depends(owned_prof
             "filter_text": out.get("filter_text"),
             "filter_has_contact": out.get("filter_has_contact"),
             "filter_min_score": out.get("filter_min_score")}
+
+
+# ---------------------------------------------------------------------------
+# Compose a well-written outreach email for one lead — grounded in the lead's
+# own signal + the seller's dossier. Returns {to, from, subject, body} for the
+# mailing composer (To is blank if the lead has no contact — user fills it).
+# ---------------------------------------------------------------------------
+# Mailing safety net (non-admin) — in-memory: initial-compose count per user + one
+# regenerate per (user, company). Resets on restart (fine for a trial nudge).
+_email_counts: dict = {}
+_email_regen_used: set = set()
+
+_EMAIL_TOOL = {
+    "name": "compose_email",
+    "description": "Write a short, personalized outreach email from the seller to a lead.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string", "description": "specific, non-spammy subject, under 8 words"},
+            "body": {"type": "string", "description": "the email body, 3-5 short sentences, signed off as the seller"},
+        },
+        "required": ["subject", "body"],
+    },
+}
+
+_EMAIL_PROMPT = """Write a short, high-quality outreach email FROM the seller TO the lead below.
+
+SELLER (who is sending — sign off as them):
+{seller}
+
+LEAD (personalize with THEIR specific signal):
+Company: {company}
+Their signal / why they fit: {why}
+Proof: {proof}
+
+Rules:
+- Open with THEIR specific situation (the signal above) so it's clearly not a mass blast.
+- One line on what the seller does + why it's relevant to them RIGHT NOW.
+- Soft, low-friction CTA (a question, or "worth a quick chat?").
+- 3-5 short sentences. Human, direct, NO corporate fluff, NO "I hope this email finds you well".
+{tone}
+Return subject + body."""
+
+
+@router.post("/{profile_id}/compose-email")
+async def compose_email(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    """Return {to, from, subject, body} — a real email written from the lead's signal + seller dossier."""
+    company = (body.get("company") or "").strip()
+    tone = (body.get("tone") or "").strip()  # optional 'regenerate' nudge (e.g. "shorter", "warmer")
+    regenerate = bool(body.get("regenerate"))
+
+    # Safety net: non-admins get MAX_EMAILS_PER_USER free emails, each regenerable once.
+    uid = user.get("id")
+    if not user.get("is_admin"):
+        if regenerate:
+            rk = f"{uid}:{company.lower()}"
+            if rk in _email_regen_used:
+                return {"limited": True, "reason": "regenerate",
+                        "message": "You can regenerate an email once. Buy credits to auto-mail your list."}
+            _email_regen_used.add(rk)
+        elif _email_counts.get(uid, 0) >= MAX_EMAILS_PER_USER:
+            return {"limited": True, "reason": "cap",
+                    "message": f"You've used your {MAX_EMAILS_PER_USER} free AI-written emails. "
+                               "Buy credits to auto-mail your whole list."}
+        else:
+            _email_counts[uid] = _email_counts.get(uid, 0) + 1
+
+    data = _load_results_any(profile_id) or {}
+    leads = data.get("leads", []) or []
+    key = company.lower()
+    lead = next((l for l in leads if (l.get("company_name") or "").strip().lower() == key), None) or {}
+
+    seller_txt = "(seller profile)"
+    try:
+        prow = supabase.table("user_profiles").select("search_profile, icp_text, name") \
+            .eq("id", profile_id).execute()
+        if prow.data:
+            p = prow.data[0]
+            d = (p.get("search_profile") or {}).get("dossier") or {}
+            seller_txt = (f"Name: {p.get('name') or '—'}\n"
+                          f"What they sell: {(d.get('offering') or p.get('icp_text') or '')[:400]}")
+    except Exception:
+        pass
+
+    subject, email_body = f"Quick question, {company}" if company else "Quick question", ""
+    try:
+        from app.llm import AsyncAnthropic
+        from app.config import ANTHROPIC_API_KEY
+        client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+        resp = await client.messages.create(
+            model="claude-sonnet-4-6", max_tokens=500,
+            tools=[_EMAIL_TOOL], tool_choice={"type": "tool", "name": "compose_email"},
+            messages=[{"role": "user", "content": _EMAIL_PROMPT.format(
+                seller=seller_txt, company=company or "(the company)",
+                why=(lead.get("why") or "")[:300], proof=(lead.get("proof") or "")[:200],
+                tone=(f"- Adjust the tone: {tone}." if tone else ""))}],
+        )
+        out = next((b.input for b in resp.content if getattr(b, "type", "") == "tool_use"), None) or {}
+        subject = out.get("subject") or subject
+        email_body = out.get("body") or email_body
+    except Exception as e:
+        logger.warning(f"[compose] failed: {e}")
+
+    return {
+        "to": lead.get("contact_email") or "",   # blank if not enriched → user fills it
+        "from": user.get("email") or "",
+        "subject": subject,
+        "body": email_body,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Persistent mailing list (per profile) — survives sessions. Table: mail_items.
+# ---------------------------------------------------------------------------
+@router.get("/{profile_id}/mail-list")
+async def mail_list(profile_id: str, user: dict = Depends(owned_profile)):
+    try:
+        rows = (supabase.table("mail_items")
+                .select("lead_key, company, lead, status")
+                .eq("profile_id", profile_id).order("created_at").execute().data) or []
+    except Exception as e:
+        logger.warning(f"[mail] list failed: {e}")
+        rows = []
+    return {"items": rows}
+
+
+@router.post("/{profile_id}/mail-select")
+async def mail_select(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    key = (body.get("lead_key") or "").strip()
+    if not key:
+        return {"ok": False}
+    lead = body.get("lead") or {}
+    try:
+        # upsert lead snapshot; on conflict we DON'T touch status → 'sent' is preserved
+        supabase.table("mail_items").upsert({
+            "profile_id": profile_id, "lead_key": key,
+            "company": lead.get("company"), "lead": lead, "updated_at": "now()",
+        }, on_conflict="profile_id,lead_key").execute()
+    except Exception as e:
+        logger.warning(f"[mail] select failed: {e}")
+    return {"ok": True}
+
+
+@router.post("/{profile_id}/mail-deselect")
+async def mail_deselect(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    key = (body.get("lead_key") or "").strip()
+    try:
+        supabase.table("mail_items").delete() \
+            .eq("profile_id", profile_id).eq("lead_key", key).execute()
+    except Exception as e:
+        logger.warning(f"[mail] deselect failed: {e}")
+    return {"ok": True}
+
+
+@router.post("/{profile_id}/mail-sent")
+async def mail_sent(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    key = (body.get("lead_key") or "").strip()
+    sent = bool(body.get("sent"))
+    try:
+        supabase.table("mail_items").update(
+            {"status": "sent" if sent else "selected", "updated_at": "now()"}) \
+            .eq("profile_id", profile_id).eq("lead_key", key).execute()
+    except Exception as e:
+        logger.warning(f"[mail] sent failed: {e}")
+    return {"ok": True}
 
 
 @router.get("/{profile_id}")
