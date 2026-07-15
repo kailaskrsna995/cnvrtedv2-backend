@@ -768,8 +768,15 @@ _ASSISTANT_TOOL = {
     },
 }
 
-_ASSISTANT_PROMPT = """You are the seller's co-pilot over their CURRENT lead list. Read their
-message and pick ONE action.
+_ASSISTANT_PROMPT = """You are the seller's co-pilot. You understand their BUSINESS (below) AND their
+CURRENT lead list. Read their message and pick ONE action.
+
+SELLER — the business you're helping (use this to show you UNDERSTAND them, kept PRIVATE):
+{seller}
+When you talk about the seller, sound like a sharp colleague who GETS their business — a natural
+1-2 sentence summary of what they do and who they sell to. Do NOT recite or list the internal
+targeting mechanics: no dumping the full segment list, the buyer-title list, the signals/queries/
+weights we use to find leads, or anchor companies. Show understanding, never hand over the playbook.
 
 CURRENT LEADS (company [type] score — why):
 {leads}
@@ -792,7 +799,9 @@ Actions:
 - get_contact: they want the decision-maker / contact for a specific company. Set target to that
   company; in reply say you're pulling the contact.
 - refine: they want to change WHO is targeted ("these aren't my buyers", "focus on X", "exclude Y", "only India").
-- answer: greeting / general question / anything else → just reply.
+- answer: a greeting, or a general question — INCLUDING questions about the SELLER'S OWN BUSINESS
+  ("what's your understanding of us?", "who are we targeting?", "what do we sell?") → reply using the
+  SELLER + LEADS context above. Never say you don't know the seller — it's described above.
 
 Always write reply. Keep it warm and short."""
 
@@ -813,6 +822,27 @@ async def assistant(profile_id: str, body: dict, user: dict = Depends(owned_prof
         for l in leads[:40]
     ) or "(no leads yet — a scan hasn't produced results)"
 
+    # Seller context — the dossier + ICP so the co-pilot understands the BUSINESS it's helping,
+    # not just the leads (fixes "what's your understanding of X?" → "don't see them in your leads").
+    seller_txt = "(seller profile not built yet)"
+    try:
+        prow = supabase.table("user_profiles").select("search_profile, icp_text, name") \
+            .eq("id", profile_id).execute()
+        if prow.data:
+            p = prow.data[0]
+            d = (p.get("search_profile") or {}).get("dossier") or {}
+            segs = ", ".join(s.get("name", "") for s in (d.get("core_segments") or [])[:5])
+            seller_txt = (
+                f"Name: {p.get('name') or '—'}\n"
+                f"What they sell: {(d.get('offering') or '')[:300] or '—'}\n"
+                f"Target segments: {segs or '—'}\n"
+                f"Buyer titles: {', '.join(d.get('buyer_titles') or []) or '—'}\n"
+                f"Geo: {d.get('geo') or '—'}\n"
+                f"ICP: {(p.get('icp_text') or '')[:500] or '—'}"
+            )
+    except Exception as e:
+        logger.warning(f"[assistant] seller ctx load failed: {e}")
+
     # recent chat turns (from the frontend) so references like "it"/"that one" resolve
     history = body.get("history") or []
     hist_txt = "\n".join(
@@ -827,7 +857,8 @@ async def assistant(profile_id: str, body: dict, user: dict = Depends(owned_prof
             model="claude-sonnet-4-6", max_tokens=400,
             tools=[_ASSISTANT_TOOL], tool_choice={"type": "tool", "name": "assistant_action"},
             messages=[{"role": "user",
-                       "content": _ASSISTANT_PROMPT.format(leads=ctx, message=message, history=hist_txt)}],
+                       "content": _ASSISTANT_PROMPT.format(seller=seller_txt, leads=ctx,
+                                                           message=message, history=hist_txt)}],
         )
         out = next((b.input for b in resp.content if getattr(b, "type", "") == "tool_use"), None) or {}
     except Exception as e:
