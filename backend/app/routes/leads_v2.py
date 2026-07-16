@@ -10,6 +10,7 @@ LEADS ROUTES (V2)
 import asyncio
 import logging
 import os
+import re
 import json
 import uuid as _uuid
 import datetime as _dt
@@ -23,6 +24,21 @@ from app import usage
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/leads/v2", tags=["leads_v2"])
+
+# Company-name normalization for the dedup/stacking key. Conservative on purpose: it
+# strips only case, punctuation, and true LEGAL suffixes (Inc/Ltd/LLC/…) so that
+# "Foo Films, Inc." and "Foo Films" merge — but it deliberately leaves brand words like
+# "Media", "Studios", "Films", "Group" alone (stripping those would wrongly merge two
+# different companies). Fuzzy same-company matching ("Foo" vs "Foo Films") is a harder,
+# riskier follow-up — not done here to avoid over-merging.
+_LEGAL_SUFFIXES = {"inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation",
+                   "pvt", "private", "gmbh", "plc", "llp", "ag", "sa", "bv", "nv"}
+
+
+def _norm_company_key(name: str) -> str:
+    s = re.sub(r"[^\w\s]", " ", (name or "").lower())
+    toks = [t for t in s.split() if t not in _LEGAL_SUFFIXES]
+    return " ".join(toks).strip()
 
 
 def _runs_for_profile(profile_id: str) -> int:
@@ -277,6 +293,20 @@ async def _run_agent_and_score(profile_id: str):
             logger.error(f"[leads] News agent failed (continuing): {e}")
             _stage("News agent", "failed", error=str(e))
 
+        # Signal engine — dossier need_signals → per-detector weak signals, each pushed
+        # under its OWN signal_type so the company-level dedup below STACKS them (+0.10
+        # when a company lights up across >=2 types). Tagged source_platform="signal_engine"
+        # so the vector gate is skipped (short, weakly-embedding texts). Additive + isolated:
+        # a failure never kills the scan, and it no-ops cleanly if the profile has no dossier.
+        logger.info(f"[leads] Running signal engine for {profile_id}")
+        try:
+            from app.agents.signal_engine import run as run_signal_engine
+            se_stats = await run_signal_engine(profile_id)
+            _stage("Signal engine", "ok", se_stats)
+        except Exception as e:
+            logger.error(f"[leads] Signal engine failed (continuing): {e}")
+            _stage("Signal engine", "failed", error=str(e))
+
         # Precision agent (Seller Brain → on-target live leads). Dossier exa_queries →
         # Exa companies → dossier-fit rank → fresh-trigger check → signals. Additive:
         # if it yields nothing the broad agents above still produce the baseline.
@@ -434,7 +464,7 @@ async def _run_agent_and_score(profile_id: str):
         def _push_live(lead: dict):
             if not lead or not lead.get("passed"):
                 return
-            key = (lead.get("company_name") or lead.get("source_url") or "").strip().lower()
+            key = _norm_company_key(lead.get("company_name")) or (lead.get("source_url") or "").strip().lower()
             if not key:
                 return
             cur = _live_leads.get(key)
@@ -455,10 +485,13 @@ async def _run_agent_and_score(profile_id: str):
                 # Vector gate — skipped for watchlist (in-ICP) AND buyer_intent AND hiring
                 # (already relevance-filtered / short structured text embeds low vs the long
                 # ICP; the role→offering relevance is judged by the scorer, not vectors) AND
-                # precision_exa signals (already Exa-semantic + dossier-fit ranked).
+                # precision_exa signals (already Exa-semantic + dossier-fit ranked) AND
+                # signal_engine detectors (dossier-derived, short weak-signal text — the
+                # dossier-aware scorer + judge are the real gate, not cosine sim).
                 is_precision = signal.get("source_platform") == "precision_exa"
+                is_signal_engine = signal.get("source_platform") == "signal_engine"
                 match_score = None
-                if stype not in ("watchlist", "buyer_intent", "hiring") and not is_precision:
+                if stype not in ("watchlist", "buyer_intent", "hiring") and not is_precision and not is_signal_engine:
                     signal_vector = await vectorise_text(raw_text)
                     if not signal_vector:
                         return None
@@ -534,7 +567,7 @@ async def _run_agent_and_score(profile_id: str):
         # 2+ signal types = real stacking → +0.10 boost (capped).
         grouped: dict = {}
         for r in results:
-            key = (r.get("company_name") or "").strip().lower()
+            key = _norm_company_key(r.get("company_name"))
             if not key:
                 # no company name (some buyer_intent) — keep as its own row
                 key = f"_anon_{r.get('source_url','')}"
