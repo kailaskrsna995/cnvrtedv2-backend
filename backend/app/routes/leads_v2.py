@@ -609,19 +609,9 @@ async def _run_agent_and_score(profile_id: str):
         except Exception as e:
             logger.error(f"[leads] judge failed (keeping all): {e}")
 
-        # OUTREACH — one batched Sonnet call writes a personalized opener per final
-        # lead. Fully error-isolated (leads returned unchanged on failure).
-        if passed:
-            try:
-                from app.pipeline.scoring import generate_outreach
-                passed = await generate_outreach(passed, user_context, icp_text, dossier)
-                _stage("Outreach lines (Sonnet)", "ok", {
-                    "leads": len(passed),
-                    "written": sum(1 for l in passed if l.get("outreach")),
-                })
-            except Exception as e:
-                logger.error(f"[leads] outreach failed (continuing): {e}")
-                _stage("Outreach lines (Sonnet)", "failed", error=str(e))
+        # OUTREACH openers removed — the per-lead Sonnet opener is no longer written
+        # or displayed. On-demand full emails come from the mailing dashboard's
+        # /compose-email endpoint instead.
 
         # LinkedIn contact enrichment — DISABLED in the run (Apify over free-tier budget
         # + slow timeouts hang the whole scan). Contacts are available on-demand via the
