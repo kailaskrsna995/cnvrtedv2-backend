@@ -1,12 +1,13 @@
 """
 APOLLO CONTACT ENRICHMENT
 =========================
-company domain + buyer titles → the most-senior matching point-of-contact:
-{name, title, email, linkedin}. One provider for BOTH email + LinkedIn.
+company domain + buyer titles → the best-fit point-of-contact for cold outreach — the
+FUNCTIONAL OWNER who actually replies, not the CEO — {name, title, email, linkedin}.
+One provider for BOTH email + LinkedIn.
 
 Flow (on-demand only — wired to the "Find contacts" button, NEVER auto during a scan):
   1. People Search by domain + buyer titles → candidates (name, title, linkedin_url, id).
-  2. Pick the most senior by title.
+  2. Rank by CHAMPION fit (Head/Director/Manager owns the budget + replies; C-suite = fallback).
   3. Enrich/match to REVEAL the work email (this is the credit-consuming step).
 """
 
@@ -19,17 +20,34 @@ from app import usage
 logger = logging.getLogger(__name__)
 BASE = "https://api.apollo.io/api/v1"
 
-# Title seniority — higher rank = more senior decision-maker.
-_SENIORITY = ["founder", "ceo", "chief", "president", "vp", "vice president",
-              "head", "director", "lead", "principal", "senior manager", "manager"]
+# Cold-outreach RESPONDER sweet spot (persona-aware, NOT raw seniority). The person who
+# actually reads a cold email, owns the relevant budget, and routes it is the FUNCTIONAL
+# OWNER — Head / Director / Manager / Lead of the function — not the CEO (who delegates and
+# won't reply) and not a junior IC (no budget). So we rank the champion band highest, VP
+# just below, and keep the C-suite only as a FALLBACK (the right answer at a tiny company
+# with no functional layer). Higher = better cold-outreach target.
+_CSUITE_ABBR = {"ceo", "cmo", "cto", "coo", "cfo", "cro", "cco", "cpo", "cxo"}  # whole-word only
+_JUNIOR = ("coordinator", "associate", "assistant", "intern", "trainee", "analyst")
 
 
 def _rank(title: str) -> int:
-    t = (title or "").lower()
-    for i, w in enumerate(_SENIORITY):
-        if w in t:
-            return len(_SENIORITY) - i
-    return 0
+    """Champion fit for cold outreach (higher = better target). C-suite abbreviations are
+    matched as whole WORDS — substring would wrongly catch e.g. 'coo' inside 'coordinator'."""
+    t = (title or "").strip().lower()
+    if not t:
+        return 3
+    words = set(re.split(r"[^a-z]+", t))
+    if t.startswith("head") or "head of" in t or "director" in t:
+        return 6                                    # functional owner — best
+    if any(w in t for w in ("manager", "lead", "principal")):
+        return 5                                    # owns/executes the function, replies
+    if "vp" in t or "vice president" in t:
+        return 4                                    # senior functional, less responsive
+    if (words & _CSUITE_ABBR) or any(w in t for w in ("chief", "founder", "president", "owner", "partner")):
+        return 2                                    # C-suite — reachable FALLBACK only
+    if any(w in t for w in _JUNIOR):
+        return 1                                    # too junior — no budget
+    return 3                                        # unknown/other — neutral
 
 
 def _clean_email(e: str) -> str | None:
@@ -77,7 +95,7 @@ async def _resolve_domain(http, headers, company_name: str) -> str | None:
 async def find_contact(company_name: str, domain: str, titles: list[str]) -> dict | None:
     """Best POC for a company, or None. Maximizes Apollo coverage: resolves a domain if
     missing, broadens titles if the filtered search is empty, and walks candidates
-    (senior first) revealing until one yields a work email (reveals capped at 3 = cost bound)."""
+    (champion first) revealing until one yields a work email (reveals capped at 3 = cost bound)."""
     if not APOLLO_API_KEY:
         return None
     headers = {"X-Api-Key": APOLLO_API_KEY, "Content-Type": "application/json", "Cache-Control": "no-cache"}
@@ -107,8 +125,8 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
                 return None
             people.sort(key=lambda p: _rank(p.get("title")), reverse=True)
 
-            # 2. Walk candidates most-senior first; reveal until one has a work email.
-            #    reveals capped at 3 → bounds credit cost per company.
+            # 2. Walk candidates CHAMPION-first (functional owner > VP > C-suite fallback);
+            #    reveal until one has a work email. reveals capped at 3 → bounds credit cost.
             best = None
             reveals = 0
             for p in people[:6]:
@@ -138,8 +156,8 @@ async def find_contact(company_name: str, domain: str, titles: list[str]) -> dic
                 }
                 if email:
                     return cand              # reachable contact found → done
-                best = best or cand          # keep the most-senior as a fallback (name/title/linkedin)
-            return best                      # no email anywhere → still return the top person
+                best = best or cand          # keep the top champion as a fallback (name/title/linkedin)
+            return best                      # no email anywhere → still return the best-fit person
     except Exception as e:
         logger.error(f"[apollo] find_contact failed for {domain}: {e}")
         return None
