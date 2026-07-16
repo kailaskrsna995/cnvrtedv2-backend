@@ -11,6 +11,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+
+from app.ratelimit import limiter
 
 # V2 routes
 from app.routes.auth_route import router as auth_router
@@ -21,9 +25,27 @@ from app.routes.leads_v2 import router as leads_router
 
 app = FastAPI(title="cnvrted V2", version="2.0.0")
 
+# Rate limiting — the limiter is attached to the app and a 429 handler is installed so
+# @limiter.limit(...) decorators on the auth routes take effect (brute-force / signup-spam
+# protection on the public, unauthenticated /auth/login and /auth/register endpoints).
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS — only our own frontends may call this API from a browser. Auth is a Bearer
+# token in the Authorization header (not cookies), so allow_credentials stays False.
+# Exact prod origins + localhost for dev; the regex allows THIS project's Vercel preview
+# deploys (cnvrted-ui-<hash>.vercel.app) so preview testing keeps working.
+ALLOWED_ORIGINS = [
+    "https://beta.cnvrted.com",
+    "https://cnvrted-ui.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:3001",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # demo: no auth, open to the Vercel frontend
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https://cnvrted-ui-[a-z0-9-]+\.vercel\.app$",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

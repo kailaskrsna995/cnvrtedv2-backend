@@ -8,9 +8,10 @@ AUTH ROUTES
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 
 from app.database import supabase
+from app.ratelimit import limiter
 from app.auth import (
     hash_password, verify_password, validate_password_strength, validate_email,
     create_access_token, get_current_user, _is_admin,
@@ -21,7 +22,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register")
-async def register(body: dict):
+@limiter.limit("10/hour")   # cap signup spam per IP
+async def register(request: Request, body: dict):
     email = validate_email(body.get("email"))
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
@@ -54,7 +56,8 @@ async def register(body: dict):
 
 
 @router.post("/login")
-async def login(body: dict):
+@limiter.limit("5/minute")   # brute-force protection per IP
+async def login(request: Request, body: dict):
     email = validate_email(body.get("email"))
     password = body.get("password") or ""
     r = supabase.table("users").select("id, email, username, password_hash").eq("email", email).limit(1).execute()
