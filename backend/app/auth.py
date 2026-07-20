@@ -46,6 +46,18 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
+# A valid bcrypt hash of a fixed value. On the login "user not found" path we run a
+# verify against THIS so the request takes the same time as a real check — otherwise
+# skipping bcrypt makes not-found responses measurably faster (timing-based user
+# enumeration). Result is discarded; only the constant time cost matters.
+_DUMMY_HASH = bcrypt.hashpw(b"cnvrted-timing-guard", bcrypt.gensalt()).decode("utf-8")
+
+
+def dummy_password_verify(plain: str) -> None:
+    """Burn the same time as a real verify (anti timing-enumeration). Return ignored."""
+    verify_password(plain, _DUMMY_HASH)
+
+
 def validate_password_strength(pw: str) -> None:
     """Strict policy: >=10 chars incl. upper, lower, number, symbol. Raises 422."""
     problems = []

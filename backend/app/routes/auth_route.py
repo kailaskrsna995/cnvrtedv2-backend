@@ -14,7 +14,7 @@ from app.database import supabase
 from app.ratelimit import limiter
 from app.auth import (
     hash_password, verify_password, validate_password_strength, validate_email,
-    create_access_token, get_current_user, _is_admin,
+    create_access_token, get_current_user, _is_admin, dummy_password_verify,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,10 +61,14 @@ async def login(request: Request, body: dict):
     email = validate_email(body.get("email"))
     password = body.get("password") or ""
     r = supabase.table("users").select("id, email, username, password_hash").eq("email", email).limit(1).execute()
-    if not r.data or not r.data[0].get("password_hash"):
+    user = r.data[0] if r.data else None
+    stored_hash = (user or {}).get("password_hash")
+    if not stored_hash:
+        # Run a dummy verify so this path costs the same time as a real check → no
+        # timing-based email enumeration. Same generic error either way.
+        dummy_password_verify(password)
         raise HTTPException(401, "Invalid email or password.")
-    user = r.data[0]
-    if not verify_password(password, user["password_hash"]):
+    if not verify_password(password, stored_hash):
         raise HTTPException(401, "Invalid email or password.")
     token = create_access_token(user["id"], email)
     return {"token": token, "user": {"id": user["id"], "email": email,
