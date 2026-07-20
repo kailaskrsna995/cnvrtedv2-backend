@@ -324,10 +324,19 @@ async def icp_chat(profile_id: str, body: ICPChatMessage, user: dict = Depends(o
     return {"message": "ICP chat coming soon", "type": "chat"}
 
 
+# Columns a client must never be able to set via the profile-update body (ownership
+# reassignment, identity, server-managed vectors/timestamps). Everything else is editable.
+_PROTECTED_PROFILE_FIELDS = {"id", "user_id", "created_at", "updated_at", "icp_vector"}
+
+
 @router.put("/{profile_id}")
 async def update_profile(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
     """Update profile fields. Re-runs Profile Agent if ICP-related fields change."""
-    supabase.table("user_profiles").update(body).eq("id", profile_id).execute()
+    # Whitelist by dropping protected keys — prevents mass-assignment (e.g. reassigning
+    # user_id to hijack ownership, or clobbering the server-managed vector).
+    clean = {k: v for k, v in (body or {}).items() if k not in _PROTECTED_PROFILE_FIELDS}
+    if clean:
+        supabase.table("user_profiles").update(clean).eq("id", profile_id).execute()
     return {"status": "updated"}
 
 

@@ -12,7 +12,7 @@ from app.models import AgentTriggerRequest
 from app.database import supabase
 from app.queue import signal_queue
 from app.agents import reddit_agent, funding_agent, hiring_agent, buyer_intent_agent, news_agent
-from app.auth import get_current_user, assert_owner
+from app.auth import get_current_user, assert_owner, require_admin
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -71,8 +71,9 @@ async def trigger_agents(body: AgentTriggerRequest, user: dict = Depends(get_cur
 
 
 @router.get("/status")
-async def get_agent_status(user: dict = Depends(get_current_user)):
-    """Return last run stats for each agent."""
+async def get_agent_status(_admin: dict = Depends(require_admin)):
+    """Return last run stats for each agent. Admin-only — this is global operational
+    telemetry (agent names, signal counts), not user data; founders only."""
     result = supabase.table("agent_runs") \
         .select("agent_name, status, signals_found, started_at, completed_at, error_message") \
         .order("started_at", desc=True) \
@@ -82,6 +83,6 @@ async def get_agent_status(user: dict = Depends(get_current_user)):
 
 
 @router.get("/queue")
-async def get_queue_size(user: dict = Depends(get_current_user)):
-    """How many signals are waiting to be processed."""
+async def get_queue_size(_admin: dict = Depends(require_admin)):
+    """How many signals are waiting to be processed. Admin-only (operational)."""
     return {"queue_size": signal_queue.size()}

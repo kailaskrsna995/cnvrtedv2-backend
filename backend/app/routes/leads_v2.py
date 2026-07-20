@@ -18,7 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from app.database import supabase
 from app.pipeline.assembly import assemble_list
 from app.models import LeadStatusUpdate
-from app.auth import owned_profile, get_current_user
+from app.auth import owned_profile, get_current_user, assert_owner
 from app.config import MAX_RUNS_PER_PROFILE, MAX_CONCURRENT_SCANS, MAX_EMAILS_PER_USER
 from app import usage
 
@@ -1454,22 +1454,33 @@ async def add_client(profile_id: str, body: dict, user: dict = Depends(owned_pro
 
 @router.delete("/clients/{client_id}")
 async def remove_client(client_id: str, user: dict = Depends(get_current_user)):
+    # Ownership check: the client must belong to a profile the caller owns (prevents
+    # cross-tenant deletion by id). assert_owner raises 403/404 for non-owners.
+    row = supabase.table("existing_clients").select("profile_id").eq("id", client_id).limit(1).execute()
+    if not row.data:
+        return {"status": "deleted"}   # not found / already gone — idempotent, no leak
+    assert_owner(row.data[0]["profile_id"], user)
     supabase.table("existing_clients").delete().eq("id", client_id).execute()
     return {"status": "deleted"}
 
 
 @router.put("/{lead_id}/status")
 async def update_lead_status(lead_id: str, body: LeadStatusUpdate, user: dict = Depends(get_current_user)):
+    # Ownership check: resolve the lead's profile and assert the caller owns it
+    # (prevents cross-tenant status modification by id). Fetched once, reused below.
+    lead = supabase.table("leads").select("profile_id, signal_id").eq("id", lead_id).limit(1).execute()
+    if not lead.data:
+        return {"status": "updated"}   # not found — idempotent, no existence leak
+    row = lead.data[0]
+    assert_owner(row["profile_id"], user)
+
     supabase.table("leads").update({"status": body.status}).eq("id", lead_id).execute()
     if body.status == "dismissed":
-        lead = supabase.table("leads").select("profile_id, signal_id").eq("id", lead_id).execute()
-        if lead.data:
-            row = lead.data[0]
-            signal = supabase.table("signals").select("signal_hash").eq("id", row["signal_id"]).execute()
-            if signal.data:
-                supabase.table("seen_signals").upsert({
-                    "profile_id": row["profile_id"],
-                    "signal_hash": signal.data[0]["signal_hash"],
-                    "action": "dismissed",
-                }, on_conflict="profile_id,signal_hash").execute()
+        signal = supabase.table("signals").select("signal_hash").eq("id", row["signal_id"]).execute()
+        if signal.data:
+            supabase.table("seen_signals").upsert({
+                "profile_id": row["profile_id"],
+                "signal_hash": signal.data[0]["signal_hash"],
+                "action": "dismissed",
+            }, on_conflict="profile_id,signal_hash").execute()
     return {"status": "updated"}
