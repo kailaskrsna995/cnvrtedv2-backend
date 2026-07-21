@@ -880,7 +880,9 @@ Actions:
   deals (prioritise STALE ones), be specific and short. Never say you don't know the seller/pipeline —
   they're described above.
 
-Always write reply. Keep it warm and short."""
+Always write reply. Be BRIEF and direct — answer ONLY what was asked, in 1-3 short sentences. Do NOT
+add unsolicited commentary, trivia, well-wishes, emojis, or extra facts about the company/deal beyond
+what the seller asked for."""
 
 
 @router.post("/{profile_id}/assistant")
