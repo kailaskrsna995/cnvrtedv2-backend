@@ -22,6 +22,7 @@ from app.routes.admin_route import router as admin_router
 from app.routes.profiles import router as profiles_router
 from app.routes.agents_route import router as agents_router
 from app.routes.leads_v2 import router as leads_router
+from app.routes.pipeline import router as pipeline_router
 
 app = FastAPI(title="cnvrted V2", version="2.0.0")
 
@@ -57,6 +58,7 @@ app.include_router(admin_router)
 app.include_router(profiles_router)
 app.include_router(agents_router)
 app.include_router(leads_router)
+app.include_router(pipeline_router)
 
 
 @app.on_event("startup")

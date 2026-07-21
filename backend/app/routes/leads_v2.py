@@ -1076,6 +1076,14 @@ async def mail_sent(profile_id: str, body: dict, user: dict = Depends(owned_prof
             .eq("profile_id", profile_id).eq("lead_key", key).execute()
     except Exception as e:
         logger.warning(f"[mail] sent failed: {e}")
+    # Auto-move: marking a mail sent advances the pipeline card New → Contacted (if one
+    # exists). Best-effort + isolated — a pipeline hiccup never breaks the mail flow.
+    if sent:
+        try:
+            from app.routes.pipeline import on_mail_sent
+            await on_mail_sent(profile_id, key)
+        except Exception as e:
+            logger.debug(f"[mail] pipeline auto-move skipped: {e}")
     return {"ok": True}
 
 
