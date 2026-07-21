@@ -166,15 +166,35 @@ async def remove_item(profile_id: str, body: dict, user: dict = Depends(owned_pr
 
 # ── auto-move triggers (called by other modules, not HTTP) ─────────────────
 async def on_mail_sent(profile_id: str, lead_key: str) -> None:
-    """When a mail is marked sent, advance the card New → Contacted (only if it exists and
-    is still in New). Best-effort — never raises into the caller."""
+    """Marking a mail sent puts the deal in Contacted — AUTO-POPULATE: create the card if it
+    isn't in the pipeline yet (using the mail_items lead snapshot), else advance it from New.
+    So the pipeline builds itself as the seller does outreach. Best-effort, never raises."""
     try:
-        key = _norm_key(lead_key)
+        raw = (lead_key or "").strip()          # mail_items stores the key as-sent (not normalized)
+        key = _norm_key(raw)                     # pipeline keys are normalized
         if not key:
             return
-        cur = (supabase.table("pipeline_items").select("stage")
+        cur = (supabase.table("pipeline_items").select("id, stage")
                .eq("profile_id", profile_id).eq("lead_key", key).limit(1).execute())
-        if cur.data and cur.data[0]["stage"] == "new":
-            await _move(profile_id, key, "contacted", reason="email sent")
+        if cur.data:
+            if cur.data[0]["stage"] == "new":
+                await _move(profile_id, key, "contacted", reason="email sent")
+            return
+        # Not tracked yet → create the card in Contacted from the mail's stored lead snapshot.
+        mi = (supabase.table("mail_items").select("company, lead")
+              .eq("profile_id", profile_id).eq("lead_key", raw).limit(1).execute())
+        company = mi.data[0].get("company") if mi.data else None
+        lead = (mi.data[0].get("lead") if mi.data else None) or {}
+        supabase.table("pipeline_items").insert({
+            "profile_id": profile_id,
+            "lead_key": key,
+            "company": company,
+            "lead": lead,
+            "stage": "contacted",
+            "activity": [
+                _event("created", f"Added {company or 'lead'} to pipeline (email sent)"),
+                _event("stage_change", "Moved to Contacted (email sent)", {"from": "new", "to": "contacted"}),
+            ],
+        }).execute()
     except Exception as e:
         logger.debug(f"[pipeline] on_mail_sent skipped: {e}")
