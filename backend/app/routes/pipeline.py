@@ -10,20 +10,44 @@ later the canvas / conversational-intelligence) reads.
 Endpoints (all ownership-gated):
   GET  /pipeline/{profile_id}          → the board (all cards for the profile)
   POST /pipeline/{profile_id}/add      → drop a lead into the pipeline (idempotent)
-  POST /pipeline/{profile_id}/move     → change a card's stage
-  POST /pipeline/{profile_id}/update   → value / next_step / add a note
+  POST /pipeline/{profile_id}/move           → change a card's stage
+  POST /pipeline/{profile_id}/analyze-reply  → AI reads a pasted reply → suggests stage (read-only)
+  POST /pipeline/{profile_id}/mark-replied   → commit the reply → advance stage + log a reply event
+  POST /pipeline/{profile_id}/update         → value / next_step / add a note
   POST /pipeline/{profile_id}/remove   → drop a card
 Plus `on_mail_sent()` — an auto-move trigger other modules call.
 """
 import datetime as _dt
+import json
 import logging
 
 from fastapi import APIRouter, Depends
 from app.database import supabase
 from app.auth import owned_profile
+from app.config import ANTHROPIC_API_KEY
+from app.llm import AsyncAnthropic
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
+
+# Haiku reads a pasted reply → suggests the deal's next stage (used by /analyze-reply).
+# Cheap, fast, and cost-tracked via app.llm. Read-only — nothing is written until the
+# seller confirms and /mark-replied commits it.
+_HAIKU = "claude-haiku-4-5-20251001"
+_claude = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+_CLASSIFY_SYSTEM = (
+    "You are a sales co-pilot. A seller received a reply from a prospect in their pipeline. "
+    "Read the reply and decide the deal's new stage, a one-line summary, and the sentiment.\n"
+    "Stages:\n"
+    "- replied: responded/acknowledged but no clear next step.\n"
+    "- meeting: they want a call, demo, or to meet.\n"
+    "- in_talks: actively discussing details, pricing, or negotiating.\n"
+    "- won: they agreed to buy / move forward.\n"
+    "- lost: they declined or aren't interested.\n"
+    'Respond with ONLY a JSON object: {"stage": <one of the stages>, '
+    '"summary": <one short line>, "sentiment": "positive"|"neutral"|"negative", '
+    '"reasoning": <short>}'
+)
 
 # The stages, in order. Stored as text on the row so renaming/reordering later is trivial.
 STAGES = ["new", "contacted", "replied", "meeting", "in_talks", "won", "lost"]
@@ -51,6 +75,41 @@ def _norm_key(lead_key: str, lead: dict | None = None) -> str:
         return key
     l = lead or {}
     return (l.get("company_name") or l.get("company") or l.get("source_url") or "").strip().lower()
+
+
+async def _classify_reply(content: str, company: str | None = None) -> dict:
+    """Read a prospect's reply → SUGGEST {stage, summary, sentiment, reasoning}. Read-only
+    (no DB write). Robust: falls back to a safe default if the model or its JSON misbehaves,
+    so a flaky LLM never blocks the seller from logging a reply."""
+    fallback = {"stage": "replied", "summary": "Reply received", "sentiment": "neutral", "reasoning": ""}
+    text = (content or "").strip()
+    if not text:
+        return fallback
+    ctx = f"Company: {company}\n" if company else ""
+    try:
+        resp = await _claude.messages.create(
+            model=_HAIKU,
+            max_tokens=220,
+            system=_CLASSIFY_SYSTEM,
+            messages=[
+                {"role": "user", "content": f'{ctx}Prospect reply:\n"""\n{text}\n"""'},
+                {"role": "assistant", "content": "{"},  # prefill → forces clean JSON
+            ],
+        )
+        raw = "{" + (resp.content[0].text if resp.content else "")
+        data = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
+        stg = str(data.get("stage", "")).strip().lower()
+        if stg not in STAGES:
+            stg = "replied"
+        return {
+            "stage": stg,
+            "summary": (str(data.get("summary") or "").strip() or "Reply received")[:200],
+            "sentiment": str(data.get("sentiment") or "neutral").strip().lower(),
+            "reasoning": str(data.get("reasoning") or "").strip()[:200],
+        }
+    except Exception as e:
+        logger.warning(f"[pipeline] reply classify failed: {e}")
+        return fallback
 
 
 @router.get("/{profile_id}")
@@ -93,10 +152,19 @@ async def add_to_pipeline(profile_id: str, body: dict, user: dict = Depends(owne
         return {"status": "error"}
 
 
-async def _move(profile_id: str, key: str, stage: str, reason: str | None = None) -> dict | None:
-    """Core stage-move: update stage + append a stage_change event. Reused by the /move
-    endpoint AND by auto-move triggers. Returns the updated row, or None if not found /
-    bad stage. No-op (returns the row) if it's already in that stage."""
+async def _move(profile_id: str, key: str, stage: str, reason: str | None = None,
+                event_type: str = "stage_change", event_text: str | None = None,
+                event_meta: dict | None = None, force_event: bool = False) -> dict | None:
+    """Core stage-move: update stage + append an activity event. Reused by the /move
+    endpoint, the mark-replied action, AND by auto-move triggers.
+      - `event_type`/`event_text`/`event_meta` let a caller log a richer SEMANTIC event
+        (e.g. a first-class 'reply' carrying the reply text + sentiment) instead of the
+        generic stage_change, so the timeline, Orka, and later the automation/canvas can
+        key off WHAT happened, not just that a stage changed.
+      - `force_event=True` logs the event even when the stage is unchanged (a prospect can
+        reply again while already 'In Talks' — we still want that reply on the record).
+    Returns the updated row, or None if not found / bad stage. No-op (returns the row) if
+    it's already in that stage AND force_event is False."""
     if stage not in STAGES:
         return None
     cur = (supabase.table("pipeline_items").select("id, stage, activity")
@@ -104,13 +172,15 @@ async def _move(profile_id: str, key: str, stage: str, reason: str | None = None
     if not cur.data:
         return None
     row = cur.data[0]
-    if row["stage"] == stage:
+    if row["stage"] == stage and not force_event:
         return row
     activity = row.get("activity") or []
     label = _STAGE_LABEL.get(stage, stage)
-    activity.append(_event("stage_change",
-                           f"Moved to {label}" + (f" ({reason})" if reason else ""),
-                           {"from": row["stage"], "to": stage}))
+    text = event_text or ("Moved to " + label + (f" ({reason})" if reason else ""))
+    meta = {"from": row["stage"], "to": stage}
+    if event_meta:
+        meta.update(event_meta)
+    activity.append(_event(event_type, text, meta))
     upd = (supabase.table("pipeline_items")
            .update({"stage": stage, "activity": activity, "updated_at": _now()})
            .eq("id", row["id"]).execute())
@@ -125,6 +195,49 @@ async def move_stage(profile_id: str, body: dict, user: dict = Depends(owned_pro
     if moved is None:
         return {"status": "error", "message": "not found or invalid stage"}
     return {"status": "moved", "item": moved}
+
+
+@router.post("/{profile_id}/analyze-reply")
+async def analyze_reply(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    """Read-only: read a pasted reply and SUGGEST {stage, summary, sentiment}. Writes
+    nothing — the seller confirms (or overrides) the suggestion, then /mark-replied commits
+    it. Split from the commit so the AI read never mutates the deal on its own."""
+    company = None
+    key = _norm_key(body.get("lead_key"))
+    if key:
+        cur = (supabase.table("pipeline_items").select("company")
+               .eq("profile_id", profile_id).eq("lead_key", key).limit(1).execute())
+        if cur.data:
+            company = cur.data[0].get("company")
+    suggestion = await _classify_reply(body.get("content") or "", company)
+    return {"status": "ok", "suggestion": suggestion}
+
+
+@router.post("/{profile_id}/mark-replied")
+async def mark_replied(profile_id: str, body: dict, user: dict = Depends(owned_profile)):
+    """Commit a reply: advance the deal to the (confirmed) `stage` and log a first-class
+    `reply` event carrying the reply text + sentiment. `stage`/`summary`/`sentiment` come
+    from the seller confirming the AI suggestion; all optional → falls back to a plain
+    'Replied'. Manual stand-in for inbox-sync reply tracking (Phase 2): this event is the
+    seam a follow-up sequence will later key off to stop chasing + trigger next-best-action."""
+    key = _norm_key(body.get("lead_key"))
+    stage = (body.get("stage") or "replied").strip().lower()
+    if stage not in STAGES:
+        stage = "replied"
+    content = (body.get("content") or "").strip()
+    summary = (body.get("summary") or "").strip()
+    sentiment = (body.get("sentiment") or "").strip().lower()
+    meta: dict = {}
+    if content:
+        meta["content"] = content
+    if sentiment:
+        meta["sentiment"] = sentiment
+    moved = await _move(profile_id, key, stage, event_type="reply",
+                        event_text=summary or "Reply received",
+                        event_meta=meta or None, force_event=True)
+    if moved is None:
+        return {"status": "error", "message": "not found"}
+    return {"status": "replied", "item": moved}
 
 
 @router.post("/{profile_id}/update")
